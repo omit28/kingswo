@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.0.4
+// @version      3.0.5
 // @description  Compact Arie-style mod dock: icon grid with live on/off lights, customize panel (size, columns, labels, opacity, hide buttons), a movable + resizable Garden Almanac, and a weather timer you can switch on/off. Alt+O opens the Almanac.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -19,7 +19,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.0.4", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.0.5", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const DOCK_ID = "mg-shortcut-sidebar", ALMANAC_ID = "mg-garden-almanac", WEATHER_ID = "mg-weather-timer", STYLE_ID = "mg-garden-dock-style", GC_STYLE_ID = "mg-hide-gc-timer";
@@ -31,6 +31,11 @@
   const GRANTERS = { RainbowGranter: ["Rainbow", 0.72], GoldGranter: ["Gold", 0.72], FrostGranter: ["Frozen", 6], ThunderstruckGranter: ["Thunderstruck", 5], RainDance: ["Wet", 10], SnowGranter: ["Chilled", 8], DawnlitGranter: ["Dawnlit", 4], AmberlitGranter: ["Ambershine", 2] };
   const MUTATION_ORDER = ["Rainbow", "Gold", "Frozen", "Thunderstruck", "Wet", "Chilled", "Dawnlit", "Ambershine"];
   const MUTATION_COLOUR = { Rainbow: "linear-gradient(90deg,#f43f5e,#f59e0b,#84cc16,#22d3ee,#a78bfa)", Gold: "linear-gradient(90deg,#f59e0b,#fde047)", Frozen: "#7dd3fc", Thunderstruck: "#facc15", Wet: "#38bdf8", Chilled: "#bae6fd", Dawnlit: "#c084fc", Ambershine: "#fb923c", "Max size": "linear-gradient(90deg,#4ade80,#bef264)" };
+  // Real mutation ids -> names the game shows; every mutation a crop carries is counted exactly.
+  Object.assign(MUTATION_COLOUR, { Ambershine: "#ff8c00", Thundercharged: "#fbbf24", Dawncharged: "#a855f7", Ambercharged: "#c45e00" });
+  const MUT_LABEL = { Ambershine: "Amberlit", Dawncharged: "Dawnbound", Ambercharged: "Amberbound" };
+  const mutLabel = (id) => MUT_LABEL[id] || pretty(id);
+  const MUT_DISPLAY = ["Rainbow", "Gold", "Frozen", "Thunderstruck", "Thundercharged", "Wet", "Chilled", "Dawnlit", "Dawncharged", "Ambershine", "Ambercharged"];
   const DISPLAY_NAMES = { OrangeTulip: "Tulip", BurrosTail: "Burro's Tail", PineTree: "Pine Tree", Cacao: "Cacao Fruit", Lychee: "Lychee Fruit", DawnCelestial: "Dawnbinder Bulb", MoonCelestial: "Moonbinder Bulb", Starweaver: "Starweaver Fruit" };
   // Dock buttons. `lamp` = settings key of an automation script, so its button can show an on/off light.
   const ITEMS = [
@@ -99,7 +104,7 @@
 
   // ---------- garden maths ----------
   function computeStats(game, now = Date.now()) {
-    const out = { plants: 0, crops: 0, mature: 0, mutated: 0, growthSum: 0, maxSize: 0, nextAt: null, allAt: null, species: new Map(), missing: {}, have: {}, etas: [] };
+    const out = { plants: 0, crops: 0, mature: 0, mutated: 0, growthSum: 0, maxSize: 0, nextAt: null, allAt: null, species: new Map(), missing: {}, have: {}, totals: {}, etas: [] };
     const noteMissing = (m) => {
       const thunder = m.includes("Thunderstruck") || m.includes("Thundercharged"), frozen = m.includes("Frozen"), wet = m.includes("Wet"), chilled = m.includes("Chilled");
       const noWeather = !thunder && !frozen && !wet && !chilled, noTime = !m.some((n) => ["Ambershine", "Ambercharged", "Amberbound", "Dawnlit", "Dawncharged", "Dawnbound"].includes(n));
@@ -119,7 +124,7 @@
         out.growthSum += growth; row.growthSum += growth;
         if (muts.length) out.mutated++;
         if (slot.size != null && Number(slot.size) >= MAX_SIZE) out.maxSize++;
-        for (const m of muts) row.mutations.set(m, (row.mutations.get(m) || 0) + 1);
+        for (const m of muts) { row.mutations.set(m, (row.mutations.get(m) || 0) + 1); out.totals[m] = (out.totals[m] || 0) + 1; }
       }
     }
     for (const name of MUTATION_ORDER) out.have[name] = out.crops - (out.missing[name] || 0);
@@ -145,18 +150,19 @@
     let html = `<div class="ga-rings"><div class="ga-ring">${ring("gr1", ripePct, "#4ade80", "#bef264")}<b>Ripe now</b><span>${fmtInt(stats.mature)} of ${fmtInt(stats.crops)} crops</span></div><div class="ga-ring">${ring("gr2", growthPct, "#38bdf8", "#a5f3fc")}<b>Growth</b><span>average across ${fmtInt(stats.plants)} plants</span></div><div class="ga-ring">${ring("gr3", mutPct, "#f472b6", "#fde047")}<b>Mutated</b><span>${fmtInt(stats.mutated)} crops</span></div></div>`;
     html += `<div class="ga-pills"><div class="ga-pill"><small>Next crop ripe</small><b>${stats.nextAt === null ? "all ripe" : fmtDur(stats.nextAt - now)}</b></div><div class="ga-pill"><small>Everything ripe</small><b>${stats.allAt === null ? "now" : fmtDur(stats.allAt - now)}</b></div></div>`;
     html += `<div class="ga-h">Mutation progress</div>`;
-    for (const name of MUTATION_ORDER) {
-      const eta = stats.etas.find((e) => e.name === name), have = stats.have[name], pct = (have / stats.crops) * 100, hasAny = have > 0 || (eta && eta.pets > 0);
+    for (const name of MUT_DISPLAY) {
+      const have = stats.totals[name] || 0, pct = (have / stats.crops) * 100, eta = stats.etas.find((e) => e.name === name), tracked = MUTATION_ORDER.includes(name), hasAny = have > 0 || (eta && eta.pets > 0);
       let etaText;
-      if (!stats.missing[name]) etaText = `<b>Complete</b> — every crop that can take it has it.`;
+      if (!tracked) etaText = `Crops that have ${esc(mutLabel(name))} right now.`;
+      else if (!stats.missing[name]) etaText = `<b>Complete</b> — every crop that can take it has it.`;
       else if (eta && eta.pets) etaText = `${eta.pets} pet${eta.pets > 1 ? "s" : ""} working on it · <b>about ${fmtDur(eta.totalMs)}</b> to finish ${fmtInt(stats.missing[name])} crops`;
-      else etaText = `${fmtInt(stats.missing[name])} crops still missing · no fed pet with this granter is active`;
-      html += `<div class="ga-mut" data-dim="${hasAny ? "false" : "true"}"><div class="ga-line"><span>${esc(name)}</span><em>${fmtInt(have)} / ${fmtInt(stats.crops)}</em></div>${bar(pct, MUTATION_COLOUR[name])}<div class="ga-eta">${etaText}</div></div>`;
+      else etaText = `${fmtInt(stats.missing[name])} crops can still get it · no fed pet with this granter is active`;
+      html += `<div class="ga-mut" data-dim="${hasAny ? "false" : "true"}"><div class="ga-line"><span>${esc(mutLabel(name))}</span><em>${fmtInt(have)} / ${fmtInt(stats.crops)}</em></div>${bar(pct, MUTATION_COLOUR[name] || "#a7f3d0")}<div class="ga-eta">${etaText}</div></div>`;
     }
     html += `<div class="ga-mut"><div class="ga-line"><span>Max size</span><em>${fmtInt(stats.maxSize)} / ${fmtInt(stats.crops)}</em></div>${bar((stats.maxSize / stats.crops) * 100, MUTATION_COLOUR["Max size"])}<div class="ga-eta">Crops that reached full size.</div></div>`;
     html += `<div class="ga-h">By species</div><div class="ga-species">`;
     for (const row of [...stats.species.values()].sort((a, b) => b.crops - a.crops)) {
-      const chips = [...row.mutations.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([m, n]) => `<span class="ga-chip" style="background:${(MUTATION_COLOUR[m] || "#a7f3d0")}">${esc(m)} ${n}</span>`).join("");
+      const chips = [...row.mutations.entries()].sort((a, b) => b[1] - a[1]).map(([m, n]) => `<span class="ga-chip" style="background:${(MUTATION_COLOUR[m] || "#a7f3d0")}">${esc(mutLabel(m))} ${n}</span>`).join("");
       html += `<div class="ga-card"><h3>${esc(cropName(row.species))}</h3><div class="ga-line"><em>${fmtInt(row.crops)} crops</em><em>${fmtInt(row.mature)} ripe</em></div>${bar((row.mature / row.crops) * 100, "linear-gradient(90deg,#4ade80,#bef264)")}<div class="ga-eta">growth <b>${Math.round((row.growthSum / row.crops) * 100)}%</b></div>${chips ? `<div class="ga-chips">${chips}</div>` : ""}</div>`;
     }
     html += `</div><div class="ga-note">Preserved crops are skipped. Estimates assume each fed granter pet rolls once a minute and every hit lands on a crop that still needs it.</div>`;
