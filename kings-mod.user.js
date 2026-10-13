@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Magic Garden — Shortcut Sidebar
 // @namespace    Quinoa
-// @version      3.0.1
+// @version      3.0.2
 // @description  Compact Arie-style mod dock: icon grid with live on/off lights, customize panel (size, columns, labels, opacity, hide buttons), a movable + resizable Garden Almanac, and a weather timer you can switch on/off. Alt+O opens the Almanac.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -18,7 +18,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION = "v3.0";
+  const VERSION_NUM = "3.0.1", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const DOCK_ID = "mg-shortcut-sidebar", ALMANAC_ID = "mg-garden-almanac", WEATHER_ID = "mg-weather-timer", STYLE_ID = "mg-garden-dock-style", GC_STYLE_ID = "mg-hide-gc-timer";
@@ -224,6 +224,10 @@
 #${DOCK_ID} .gd-hb{flex:none;display:grid;place-items:center;width:${U(22)};height:${U(22)};padding:0;border:1px solid rgba(255,255,255,.12);border-radius:${U(7)};background:rgba(255,255,255,.06);color:#cfd8d2;cursor:pointer}
 #${DOCK_ID} .gd-hb:hover{color:#fde047;border-color:rgba(253,224,71,.6)}
 #${DOCK_ID} .gd-hb svg{width:${U(13)};height:${U(13)};fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s ease}
+#${DOCK_ID} .gd-ver{flex:none;padding:${U(2)} ${U(6)};border:1px solid rgba(255,255,255,.12);border-radius:99px;background:rgba(255,255,255,.06);color:#9db0a5;font:700 ${U(9)}/1.2 "Trebuchet MS",system-ui,sans-serif;white-space:nowrap;cursor:pointer}
+#${DOCK_ID} .gd-ver:hover{color:#fde047;border-color:rgba(253,224,71,.6)}
+#${DOCK_ID} .gd-ver[data-update="true"]{border-color:rgba(253,224,71,.85);background:rgba(253,224,71,.2);color:#fde047;animation:gd-pulse 1.8s ease-in-out infinite}
+#${DOCK_ID}[data-cols="2"] .gd-ver:not([data-update="true"]){display:none}
 #${DOCK_ID} .gd-lamps{display:none;align-items:center;gap:${U(4)}}
 #${DOCK_ID} .gd-lamps .gd-dot{position:static}
 #${DOCK_ID} .gd-grid{display:grid;grid-template-columns:repeat(var(--cols),calc(var(--cell) * 1px * var(--s)));gap:${U(7)}}
@@ -427,6 +431,23 @@
 
   // ---------- dock ----------
   let dock = null, grid = null, pop = null, miniLamps = null; const lamps = [];
+  // ---------- update check ----------
+  let latestVersion = "", updateState = "checking";
+  const verParts = (v) => String(v).split(".").map((n) => parseInt(n, 10) || 0);
+  function isNewer(a, b) { const x = verParts(a), y = verParts(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d > 0; } return false; }
+  function renderVer() {
+    const b = dock?.querySelector("[data-ver]"); if (!b) return; const up = updateState === "available";
+    b.dataset.update = String(up); b.textContent = up ? `New v${latestVersion} ↑` : VERSION;
+    b.title = up ? "New version available — click to update" : updateState === "failed" ? "Couldn't check for updates — click to retry" : "Up to date — click to check again";
+  }
+  async function checkUpdate() {
+    updateState = "checking";
+    try {
+      const res = await fetch(`${UPDATE_URL}?t=${Date.now()}`, { cache: "no-store" }); const m = (await res.text()).match(/^\/\/\s*@version\s+([\d.]+)/m);
+      if (!res.ok || !m) throw new Error("no version"); latestVersion = m[1]; updateState = isNewer(latestVersion, VERSION_NUM) ? "available" : "current";
+    } catch { updateState = "failed"; }
+    renderVer();
+  }
   function fireShortcut(code) { const key = code.slice(3).toLowerCase(); for (const type of ["keydown", "keyup"]) document.dispatchEvent(new KeyboardEvent(type, { key, code, altKey: true, bubbles: true, cancelable: true })); }
   function refreshActive() {
     if (!grid) return; const a = grid.querySelector('[data-id="almanac"]'), w = grid.querySelector('[data-id="weather"]');
@@ -487,7 +508,8 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
     dock = document.createElement("aside"); dock.id = DOCK_ID; dock.setAttribute("aria-label", "Magic Garden shortcuts");
     dock.dataset.mini = localStorage.getItem(MINI_KEY) === "true" ? "true" : "false";
     const head = document.createElement("div"); head.className = "gd-head"; head.title = "Drag to move · double-click to minimize";
-    head.innerHTML = `<span class="gd-live"></span><span class="gd-title">${esc(TITLE)}</span><span class="gd-lamps"></span><button class="gd-hb" type="button" data-gear title="Customize menu" aria-label="Customize menu">${iconSvg("sliders")}</button><button class="gd-hb" type="button" data-min title="Minimize / expand" aria-label="Minimize or expand">${iconSvg("chevron")}</button>`;
+    head.innerHTML = `<span class="gd-live"></span><span class="gd-title">${esc(TITLE)}</span><button class="gd-ver" type="button" data-ver></button><span class="gd-lamps"></span><button class="gd-hb" type="button" data-gear title="Customize menu" aria-label="Customize menu">${iconSvg("sliders")}</button><button class="gd-hb" type="button" data-min title="Minimize / expand" aria-label="Minimize or expand">${iconSvg("chevron")}</button>`;
+    head.querySelector("[data-ver]").addEventListener("click", () => { if (updateState === "available") window.open(UPDATE_URL, "_blank", "noopener"); else void checkUpdate(); });
     miniLamps = head.querySelector(".gd-lamps"); grid = document.createElement("div"); grid.className = "gd-grid";
     pop = document.createElement("div"); pop.className = "gd-pop"; pop.innerHTML = popHtml(); pop.dataset.open = "false";
     dock.append(head, grid, pop); buildButtons();
@@ -513,7 +535,7 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
       } else if (t.hasAttribute("data-reset-all")) { Object.assign(cfg, DEFAULTS, { hidden: {} }); saveCfg(); buildButtons(); applyCfg(); }
     });
     document.addEventListener("pointerdown", (event) => { if (pop.dataset.open === "true" && !dock.contains(event.target)) pop.dataset.open = "false"; }, true);
-    document.body.append(dock); applyCfg(); keepOnScreen(dock); window.addEventListener("resize", () => keepOnScreen(dock));
+    document.body.append(dock); renderVer(); void checkUpdate(); setInterval(checkUpdate, 30 * 60 * 1000); applyCfg(); keepOnScreen(dock); window.addEventListener("resize", () => keepOnScreen(dock));
     setInterval(() => { for (const [key, dot] of lamps) dot.dataset.on = String(lampOn(key)); const t = dock.querySelector(".gd-title"); if (_fnv(TITLE) !== 1311861492 || (t && t.textContent !== TITLE)) { if (t) t.textContent = atob("S2luZydzIE1vZA=="); } }, 1500);
   }
   function install() {
