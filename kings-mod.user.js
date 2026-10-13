@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.0.3
+// @version      3.0.4
 // @description  Compact Arie-style mod dock: icon grid with live on/off lights, customize panel (size, columns, labels, opacity, hide buttons), a movable + resizable Garden Almanac, and a weather timer you can switch on/off. Alt+O opens the Almanac.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -19,7 +19,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.0.3", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.0.4", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const DOCK_ID = "mg-shortcut-sidebar", ALMANAC_ID = "mg-garden-almanac", WEATHER_ID = "mg-weather-timer", STYLE_ID = "mg-garden-dock-style", GC_STYLE_ID = "mg-hide-gc-timer";
@@ -380,7 +380,7 @@
   const WEATHER_MS = 10 * 60 * 1000, LUNAR_MS = 4 * 3600 * 1000;
   const W_NAME = { Rain: "Rain", Frost: "Snow", Thunderstorm: "Thunderstorm", Dawn: "Dawn", AmberMoon: "Amber Moon" };
   const W_EMOJI = { Rain: "🌧️", Frost: "❄️", Thunderstorm: "⛈️", Dawn: "🌅", AmberMoon: "🌙" };
-  const LUNAR_IDS = new Set(["Dawn", "AmberMoon"]);
+  const LUNAR_IDS = new Set(["Dawn", "AmberMoon"]), W_SHOP = { Frost: "snow", Thunderstorm: "thunder", Dawn: "dawn" }, SLOT_MS = 5 * 60 * 1000;
   let roomGame = null, seenWeather, seenAt = 0, weatherEl = null, weatherTimer = null, roomHooked = false;
   function hookRoom() {
     if (roomHooked) return true; const conn = window.MagicCircle_RoomConnection; if (typeof conn?.subscribeToPatches !== "function") return false;
@@ -400,16 +400,20 @@
       if (cur && id === cur && s <= now && Number.isFinite(en) && en > now) endsIn = en - now;
       if (s > now && (!next || s < next.at)) next = { id, at: s, lunar: e.groupId === "Lunar" || LUNAR_IDS.has(id) };
     }
+    if (cur && endsIn === null && W_SHOP[cur]) { const dl = Number(game?.shops?.[W_SHOP[cur]]?.deadlineMs); if (Number.isFinite(dl) && dl > now) endsIn = dl - now; }
     if (cur && endsIn === null) {
       if (seenAt && now - seenAt < WEATHER_MS) endsIn = WEATHER_MS - (now - seenAt);
       else if (LUNAR_IDS.has(cur)) { const start = Math.floor(now / LUNAR_MS) * LUNAR_MS; if (now - start < WEATHER_MS) endsIn = WEATHER_MS - (now - start); }
     }
-    return { ready: !!game, cur, endsIn, next, lunarIn: (Math.floor(now / LUNAR_MS) + 1) * LUNAR_MS - now };
+    let range = null;
+    if (cur && endsIn === null) { const seedDl = Number(game?.shops?.seed?.deadlineMs), toEdge = seedDl > now && seedDl - now <= SLOT_MS ? seedDl - now : SLOT_MS - (now % SLOT_MS); range = [toEdge, toEdge + SLOT_MS]; }
+    return { ready: !!game, cur, endsIn, range, next, lunarIn: (Math.floor(now / LUNAR_MS) + 1) * LUNAR_MS - now };
   }
   function updateWeather() {
     if (!weatherEl || weatherEl.style.display === "none") return; const now = gameNow(), w = weatherInfo(now), q = (s) => weatherEl.querySelector(s);
     q(".gw-ico").innerHTML = wIcon(w.cur); q(".gw-now b").textContent = !w.ready ? "Waiting for game…" : w.cur ? wName(w.cur) : "Clear skies";
-    q(".gw-now small").textContent = w.cur && w.endsIn !== null ? `${fmtClock(w.endsIn)} left` : w.ready ? (w.cur ? "time unknown" : "no weather event") : "";
+    const mins = (ms) => Math.max(1, Math.ceil(ms / 60000));
+    q(".gw-now small").textContent = w.cur && w.endsIn !== null ? `${fmtClock(w.endsIn)} left` : w.cur && w.range ? `about ${mins(w.range[0])}–${mins(w.range[1])} min left` : w.ready ? "no weather event" : "";
     q(".gw-nl").textContent = w.next ? (w.next.lunar ? "Next: Lunar event" : `Next: ${wName(w.next.id)}`) : "Next weather";
     q(".gw-next").textContent = !w.ready ? "--" : w.next ? fmtClock(w.next.at - now) : "—"; q(".gw-lunar").textContent = fmtClock(w.lunarIn);
   }
