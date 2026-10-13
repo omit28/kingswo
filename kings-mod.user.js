@@ -1,7 +1,8 @@
 // ==UserScript==
-// @name         Magic Garden — Shortcut Sidebar
+// @name         King's Mod
 // @namespace    Quinoa
-// @version      3.0.2
+// @author       King
+// @version      3.0.3
 // @description  Compact Arie-style mod dock: icon grid with live on/off lights, customize panel (size, columns, labels, opacity, hide buttons), a movable + resizable Garden Almanac, and a weather timer you can switch on/off. Alt+O opens the Almanac.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -18,7 +19,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.0.1", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.0.3", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const DOCK_ID = "mg-shortcut-sidebar", ALMANAC_ID = "mg-garden-almanac", WEATHER_ID = "mg-weather-timer", STYLE_ID = "mg-garden-dock-style", GC_STYLE_ID = "mg-hide-gc-timer";
