@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Magic Garden — Shortcut Sidebar
 // @namespace    Quinoa
-// @version      3.0.0
+// @version      3.0.1
 // @description  Compact Arie-style mod dock: icon grid with live on/off lights, customize panel (size, columns, labels, opacity, hide buttons), a movable + resizable Garden Almanac, and a weather timer you can switch on/off. Alt+O opens the Almanac.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
