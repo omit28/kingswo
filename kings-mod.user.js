@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.1.1
+// @version      3.2.0
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -21,7 +21,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.1.0", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.2.0", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const ALERT_KEY = "mg-king-alerts-v1";
@@ -586,7 +586,7 @@
       if (d.items) { const o = {}; for (const [k, v] of Object.entries(d.items)) o[k] = { n: v.name || k, r: R(v.rarity), c: v.coinPrice, s: spriteNameOf(v.sprite || v.tileRef) || KD.tools[k]?.s || k }; KD.tools = { ...KD.tools, ...o }; }
       if (d.decor) { const o = {}; for (const [k, v] of Object.entries(d.decor)) o[k] = { n: v.name || k, r: R(v.rarity), c: v.coinPrice, s: spriteNameOf(v.sprite || v.tileRef) || KD.decor[k]?.s || k }; KD.decor = { ...KD.decor, ...o }; }
       if (d.mutations) { const o = {}; for (const [k, v] of Object.entries(d.mutations)) { o[k] = { n: v.name || k, x: v.coinMultiplier, s: spriteNameOf(v.sprite || v.tileRef) || KD.mut[k]?.s || k }; if (v.name && !(v.name in MUT_X) && v.coinMultiplier > 0) MUT_X[v.name] = v.coinMultiplier; } KD.mut = { ...KD.mut, ...o }; }
-      if (d.abilities) { const o = {}; for (const [k, v] of Object.entries(d.abilities)) o[k] = { n: v.name || k, d: v.description || "" }; KD.abil = { ...KD.abil, ...o }; }
+      if (d.abilities) { const o = {}; for (const [k, v] of Object.entries(d.abilities)) { const e = { n: v.name || k, d: v.description || "" }; if (v.trigger) e.tr = v.trigger; if (typeof v.baseProbability === "number") e.p = v.baseProbability; if (v.baseParameters && typeof v.baseParameters === "object") e.bp = v.baseParameters; o[k] = e; } KD.abil = { ...KD.abil, ...o }; }
     } catch (error) { console.warn("[King's Mod] live data", error); }
     for (const w of Object.values(WINS)) { try { if (w.isOpen()) w.render(); } catch {} }
   }
@@ -802,6 +802,7 @@
   }
 
   // ---------- Pet Deck: active pets, native teams, collection, ability log ----------
+  const ABIL_STATS = {"ProduceScaleBoost":{"n":"Crop Size Boost I","tr":"continuous","p":0.3,"bp":{"sizeIncrease":4}},"ProduceScaleBoostII":{"n":"Crop Size Boost II","tr":"continuous","p":0.4,"bp":{"sizeIncrease":7}},"ProduceScaleBoostIII":{"n":"Crop Size Boost III","tr":"continuous","p":0.5,"bp":{"sizeIncrease":9}},"SnowyCropSizeBoost":{"n":"Snow Crop Size Boost","tr":"continuous","p":0.8,"bp":{"sizeIncrease":8,"requiredWeather":"Frost"}},"DoubleHarvest":{"n":"Double Harvest","tr":"harvest","p":5},"DoubleHatch":{"n":"Double Hatch","tr":"hatchEgg","p":3},"ProduceEater":{"n":"Crop Eater","tr":"continuous","p":60,"bp":{"cropSellPriceIncreasePercentage":150}},"SellBoostI":{"n":"Sell Boost I","tr":"sellAllCrops","p":10,"bp":{"cropSellPriceIncreasePercentage":20}},"SellBoostII":{"n":"Sell Boost II","tr":"sellAllCrops","p":12,"bp":{"cropSellPriceIncreasePercentage":30}},"SellBoostIII":{"n":"Sell Boost III","tr":"sellAllCrops","p":14,"bp":{"cropSellPriceIncreasePercentage":40}},"SellBoostIV":{"n":"Sell Boost IV","tr":"sellAllCrops","p":16,"bp":{"cropSellPriceIncreasePercentage":50}},"ProduceRefund":{"n":"Crop Refund","tr":"sellAllCrops","p":20},"PlantGrowthBoost":{"n":"Plant Growth Boost I","tr":"continuous","p":24,"bp":{"plantGrowthReductionMinutes":3}},"PlantGrowthBoostII":{"n":"Plant Growth Boost II","tr":"continuous","p":27,"bp":{"plantGrowthReductionMinutes":5}},"PlantGrowthBoostIII":{"n":"Plant Growth Boost III","tr":"continuous","p":30,"bp":{"plantGrowthReductionMinutes":7}},"SnowyPlantGrowthBoost":{"n":"Snow Plant Growth Boost","tr":"continuous","p":40,"bp":{"plantGrowthReductionMinutes":6,"requiredWeather":"Frost"}},"DawnPlantGrowthBoost":{"n":"Dawn Plant Growth Boost","tr":"continuous","p":60,"bp":{"plantGrowthReductionMinutes":6,"requiredWeather":"Dawn"}},"AmberPlantGrowthBoost":{"n":"Amber Plant Growth Boost","tr":"continuous","p":80,"bp":{"plantGrowthReductionMinutes":6,"requiredWeather":"AmberMoon"}},"ProduceMutationBoost":{"n":"Weather Mutation Boost I","tr":"continuous","bp":{"mutationChanceIncreasePercentage":15}},"ProduceMutationBoostII":{"n":"Weather Mutation Boost II","tr":"continuous","bp":{"mutationChanceIncreasePercentage":20}},"ProduceMutationBoostIII":{"n":"Weather Mutation Boost III","tr":"continuous","bp":{"mutationChanceIncreasePercentage":25}},"SnowyCropMutationBoost":{"n":"Snow Boost","tr":"continuous","bp":{"mutationChanceIncreasePercentage":32,"requiredWeather":"Frost"}},"DawnBoost":{"n":"Dawn Boost","tr":"continuous","bp":{"mutationChanceIncreasePercentage":36,"requiredWeather":"Dawn"}},"AmberMoonBoost":{"n":"Amber Moon Boost","tr":"continuous","bp":{"mutationChanceIncreasePercentage":40,"requiredWeather":"AmberMoon"}},"PetMutationBoost":{"n":"Pet Mutation Boost I","tr":"hatchEgg","bp":{"mutationChanceIncreasePercentage":7}},"PetMutationBoostII":{"n":"Pet Mutation Boost II","tr":"hatchEgg","bp":{"mutationChanceIncreasePercentage":10}},"PetMutationBoostIII":{"n":"Pet Mutation Boost III","tr":"hatchEgg","bp":{"mutationChanceIncreasePercentage":13}},"GoldGranter":{"n":"Gold Granter","tr":"continuous","p":0.72,"bp":{"grantedMutations":["Gold"]}},"RainbowGranter":{"n":"Rainbow Granter","tr":"continuous","p":0.72,"bp":{"grantedMutations":["Rainbow"]}},"RainDance":{"n":"Rain Dance","tr":"continuous","p":10,"bp":{"grantedMutations":["Wet"]}},"EggGrowthBoost":{"n":"Egg Growth Boost I","tr":"continuous","p":21,"bp":{"eggGrowthTimeReductionMinutes":7}},"EggGrowthBoostII_NEW":{"n":"Egg Growth Boost II","tr":"continuous","p":24,"bp":{"eggGrowthTimeReductionMinutes":9}},"EggGrowthBoostII":{"n":"Egg Growth Boost III","tr":"continuous","p":27,"bp":{"eggGrowthTimeReductionMinutes":11}},"SnowyEggGrowthBoost":{"n":"Snowy Egg Growth Boost","tr":"continuous","p":35,"bp":{"eggGrowthTimeReductionMinutes":10,"requiredWeather":"Frost"}},"PetAgeBoost":{"n":"Hatch XP Boost I","tr":"hatchEgg","p":50,"bp":{"bonusXp":8000}},"PetAgeBoostII":{"n":"Hatch XP Boost II","tr":"hatchEgg","p":60,"bp":{"bonusXp":12000}},"PetAgeBoostIII":{"n":"Hatch XP Boost III","tr":"hatchEgg","p":70,"bp":{"bonusXp":16000}},"PetHatchSizeBoost":{"n":"Max Strength Boost I","tr":"hatchEgg","p":12,"bp":{"maxStrengthIncreasePercentage":2.4}},"PetHatchSizeBoostII":{"n":"Max Strength Boost II","tr":"hatchEgg","p":14,"bp":{"maxStrengthIncreasePercentage":3.5}},"PetHatchSizeBoostIII":{"n":"Max Strength Boost III","tr":"hatchEgg","p":16,"bp":{"maxStrengthIncreasePercentage":4.6}},"PetXpBoost":{"n":"XP Boost I","tr":"continuous","p":30,"bp":{"bonusXp":300}},"PetXpBoostII":{"n":"XP Boost II","tr":"continuous","p":35,"bp":{"bonusXp":400}},"PetXpBoostIII":{"n":"XP Boost III","tr":"continuous","p":40,"bp":{"bonusXp":500}},"SnowyPetXpBoost":{"n":"Snow XP Boost","tr":"continuous","p":50,"bp":{"bonusXp":450,"requiredWeather":"Frost"}},"HungerRestore":{"n":"Hunger Restore I","tr":"continuous","p":12,"bp":{"hungerRestorePercentage":30}},"HungerRestoreII":{"n":"Hunger Restore II","tr":"continuous","p":14,"bp":{"hungerRestorePercentage":35}},"HungerRestoreIII":{"n":"Hunger Restore III","tr":"continuous","p":16,"bp":{"hungerRestorePercentage":40}},"SnowyHungerRestore":{"n":"Snowy Hunger Restore","tr":"continuous","p":20,"bp":{"hungerRestorePercentage":38,"requiredWeather":"Frost"}},"HungerBoost":{"n":"Hunger Boost I","tr":"continuous","bp":{"hungerDepletionRateDecreasePercentage":12}},"HungerBoostII":{"n":"Hunger Boost II","tr":"continuous","bp":{"hungerDepletionRateDecreasePercentage":16}},"HungerBoostIII":{"n":"Hunger Boost III","tr":"continuous","bp":{"hungerDepletionRateDecreasePercentage":20}},"SnowyHungerBoost":{"n":"Snowy Hunger Boost","tr":"continuous","bp":{"hungerDepletionRateDecreasePercentage":30,"requiredWeather":"Frost"}},"PetRefund":{"n":"Pet Refund I","tr":"sellPet","p":5},"PetRefundII":{"n":"Pet Refund II","tr":"sellPet","p":7},"Copycat":{"n":"Copycat","tr":"continuous","p":1},"CoinFinderI":{"n":"Coin Finder I","tr":"continuous","p":35,"bp":{"baseMaxCoinsFindable":120000}},"CoinFinderII":{"n":"Coin Finder II","tr":"continuous","p":13,"bp":{"baseMaxCoinsFindable":1200000}},"CoinFinderIII":{"n":"Coin Finder III","tr":"continuous","p":6,"bp":{"baseMaxCoinsFindable":10000000}},"SnowyCoinFinder":{"n":"Snowy Coin Finder","tr":"continuous","p":15,"bp":{"baseMaxCoinsFindable":5000000,"requiredWeather":"Frost"}},"SeedFinderI":{"n":"Seed Finder I","tr":"continuous","p":40},"SeedFinderII":{"n":"Seed Finder II","tr":"continuous","p":20},"SeedFinderIII":{"n":"Seed Finder III","tr":"continuous","p":10},"SeedFinderIV":{"n":"Seed Finder IV","tr":"continuous","p":0.01},"MoonKisser":{"n":"Moon Kisser","tr":"continuous"},"DawnKisser":{"n":"Dawn Kisser","tr":"continuous"},"SnowGranter":{"n":"Snow Granter","tr":"continuous","p":8,"bp":{"grantedMutations":["Chilled"]}},"FrostGranter":{"n":"Frost Granter","tr":"continuous","p":6,"bp":{"grantedMutations":["Frozen"]}},"DawnlitGranter":{"n":"Dawnlit Granter","tr":"continuous","p":4,"bp":{"grantedMutations":["Dawnlit"]}},"AmberlitGranter":{"n":"Amberlit Granter","tr":"continuous","p":2,"bp":{"grantedMutations":["Ambershine"]}}};   // chance, trigger and numbers per ability (the live feed overrides these)
   const abilityName = (id) => KD.abil[id]?.n || pretty(id);
   function abilityTone(id) {
     if (/Gold|Rainbow/.test(id)) return "#ffd166"; if (/Granter|RainDance/.test(id)) return "#f59ac8"; if (/Coin|Sell/.test(id)) return "#f2c94c"; if (/Hunger/.test(id)) return "#fb923c";
@@ -931,39 +932,142 @@
     for (const p of pets.slice().sort((a, b) => b.strength - a.strength)) { if (team.length >= 3) break; if (!team.some((t) => t.id === p.id) && !unwanted(p)) team.push(p); }
     return team.slice(0, 3);
   }
+  // ---------- Team Builder: the best three pets you own for a goal, with the numbers behind each team ----------
+  // Same maths as Arie's Team Builder (chance per minute, what one proc gives, how long the team lasts without feeding),
+  // laid out as a different card: goal badge, pets with strength bars, one stat panel you can flip through, and a footer with the buttons.
+  const STAT_SCALED = new Set(["scaleIncreasePercentage", "cropSellPriceIncreasePercentage", "mutationChanceIncreasePercentage", "hungerRestorePercentage", "hungerRefundPercentage", "hungerDepletionRateDecreasePercentage", "plantGrowthReductionMinutes", "eggGrowthTimeReductionMinutes", "baseMaxCoinsFindable", "bonusXp", "maxStrengthIncreasePercentage", "plantAbilityChanceBoostPercentage"]);
+  const STAT_LABEL = { sizeIncrease: ["Crop size", ""], scaleIncreasePercentage: ["Crop size", "%"], cropSellPriceIncreasePercentage: ["Sell price", "%"], mutationChanceIncreasePercentage: ["Mutation chance", "%"], hungerRestorePercentage: ["Hunger restore", "%"], hungerRefundPercentage: ["Hunger refund", "%"], hungerDepletionRateDecreasePercentage: ["Hunger drain", "%"], plantGrowthReductionMinutes: ["Plant growth", "min"], eggGrowthTimeReductionMinutes: ["Egg growth", "min"], baseMaxCoinsFindable: ["Coins (max)", ""], bonusXp: ["Bonus XP", ""], maxStrengthIncreasePercentage: ["Max STR", "%"], plantAbilityChanceBoostPercentage: ["Plant ability", "%"] };
+  const TRIG_UNIT = { continuous: "/min", harvest: "/harvest", sellAllCrops: "/sale", sellPet: "/pet sold", hatchEgg: "/hatch", playerActivated: "/use", weather: "/weather" };
+  const TIER_RX = /\s*(?:_NEW)?(?:IV|I{1,3})$/, ID_TIER_RX = /(?:_NEW)?(?:IV|I{1,3})$/;
+  const stripTier = (t) => String(t).replace(TIER_RX, "").trim() || String(t);
+  function abilInfo(id) { const k = KD.abil[id] || {}, s = ABIL_STATS[id] || {}; return { n: k.n || s.n || pretty(id), tr: k.tr ?? s.tr ?? null, p: k.p ?? s.p ?? null, bp: k.bp ?? s.bp ?? {} }; }
+  function abilityAt(id, ratio) {
+    const a = abilInfo(id); if (a.tr == null && a.p == null && !Object.keys(a.bp).length) return null;
+    const r = ratio > 0 ? ratio : 0, params = {};
+    for (const [k, v] of Object.entries(a.bp)) { if (typeof v !== "number" || !Number.isFinite(v) || k === "cooldownSeconds") continue; params[k] = STAT_SCALED.has(k) ? v * r : v; }
+    return { id, name: a.n, tr: a.tr, prob: a.p == null ? null : Math.min(100, a.p * r), params, weather: typeof a.bp.requiredWeather === "string" && a.bp.requiredWeather ? a.bp.requiredWeather : null };
+  }
+  function effKey(s) {
+    const bp = abilInfo(s.id).bp; if (Array.isArray(bp.grantedMutations) && bp.grantedMutations.length) return `mutation:${bp.grantedMutations.slice().sort().join(",")}`;
+    const keys = Object.keys(s.params).sort(); return keys.length ? `param:${keys.join("+")}@${s.tr ?? "?"}` : `id:${s.id.replace(ID_TIER_RX, "")}`;
+  }
+  const combineProb = (list) => (list.length ? (1 - list.reduce((miss, p) => miss * (1 - p / 100), 1)) * 100 : null);
+  const restoreRate = (pct) => { const pm = pct / 100; if (pm <= 0) return 0; if (pm >= 1) return 60; return (1 - Math.pow(1 - pm, 1 / 60)) * 60; };
+  function teamAutonomy(pets) {
+    let drain = 0; const restores = [];
+    for (const p of pets) for (const id of p.abilities) {
+      const s = abilityAt(id, p.strength / 100); if (!s || s.weather) continue;
+      for (const k of ["hungerRefundPercentage", "hungerDepletionRateDecreasePercentage"]) if (typeof s.params[k] === "number") drain += s.params[k];
+      const amt = s.params.hungerRestorePercentage; if (typeof amt === "number" && s.prob != null) restores.push({ amt, per: restoreRate(s.prob) });
+    }
+    const remaining = Math.max(0, 1 - drain / 100); if (remaining <= 0) return { status: "sustained" };
+    let worst = null;
+    for (const p of pets) {
+      const info = KD.pets[p.species], maxH = info?.hc, dep = info?.hd; if (!(maxH > 0 && dep > 0)) return { status: "unknown" };
+      const drainPM = (maxH / dep) * remaining; let restPM = 0;
+      for (const r of restores) { const cap = Math.floor((maxH * r.amt) / 100); restPM += (r.per / pets.length) * (cap > 0 ? (cap + 1) / 2 : 0); }
+      const net = restPM - drainPM; if (net >= 0) continue; const mins = maxH / -net; if (worst === null || mins < worst) worst = mins;
+    }
+    return worst === null ? { status: "sustained" } : { status: "runs-out", mins: worst };
+  }
+  function teamStats(pets) {
+    const groups = new Map();
+    for (const p of pets) for (const id of p.abilities) {
+      const s = abilityAt(id, p.strength / 100); if (!s) continue; const m = abilityAt(id, p.maxStrength / 100), key = effKey(s);
+      let g = groups.get(key); if (!g) { g = { key, label: stripTier(abilInfo(id).n), tr: s.tr, who: [], weathers: [] }; groups.set(key, g); }
+      g.who.push({ prob: s.prob, max: m?.prob ?? null, params: s.params }); if (s.weather && !g.weathers.includes(s.weather)) g.weathers.push(s.weather);
+    }
+    const list = [...groups.values()].map((g) => { g.prob = combineProb(g.who.map((w) => w.prob).filter((x) => x != null)); g.maxProb = combineProb(g.who.map((w) => w.max).filter((x) => x != null)); return g; });
+    return { groups: list, feed: teamAutonomy(pets) };
+  }
+  const fmtPct = (v) => (v >= 10 ? `${v.toFixed(1)}%` : v >= 1 ? `${v.toFixed(2)}%` : `${v.toFixed(3)}%`);
+  const fmtAmt = (v, unit) => { const t = v.toLocaleString("en-US", { minimumFractionDigits: Math.abs(v) >= 10 ? 0 : 1, maximumFractionDigits: Math.abs(v) >= 10 ? 0 : 1 }); return unit ? (unit === "%" ? `${t}%` : `${t} ${unit}`) : t; };
+  const fmtLasts = (mins) => { const t = Math.max(0, Math.round(mins)), hh = Math.floor(t / 60), mm = t % 60; return hh > 0 ? `${hh}h${String(mm).padStart(2, "0")}` : `${mm}m`; };
+  const primaryKey = (g) => { for (const w of g.who) for (const k of Object.keys(w.params)) if (STAT_LABEL[k]) return k; return null; };
+  function statPanel(g, nav) {
+    const box = h("div", "kt-stat"), key = primaryKey(g), weather = g.weathers.length ? ` · ${g.weathers.join("/")}` : "";
+    const head = h("div", "kt-stat-h"); head.append(h("span", "kt-stat-n", esc(`${key ? STAT_LABEL[key][0] : g.label}${weather}`)));
+    if (weather) head.title = "Only fires while this weather is active.";
+    if (nav) { const n = h("span", "kt-nav"); const arrow = (glyph, d, label) => { const b = h("button", "", glyph); b.type = "button"; b.title = label; b.setAttribute("aria-label", label); b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); nav.step(d); }; return b; }; n.append(arrow("‹", -1, "Previous effect"), h("em", "", `${nav.i + 1}/${nav.n}`), arrow("›", 1, "Next effect")); head.append(n); }
+    box.append(head);
+    const val = h("div", "kt-stat-v");
+    if (g.prob == null) { const on = h("span", "kt-on", "always on"); on.title = "This ability has no proc chance: it applies continuously."; val.append(on); box.append(val); }
+    else {
+      const top = g.maxProb ?? g.prob, ratio = top > 0 ? Math.min(1, g.prob / top) : 1, tone = ratio >= 0.9 ? "#86efac" : ratio >= 0.75 ? "#fcd34d" : "#fca5a5";
+      const big = h("b", "kt-big", fmtPct(g.prob)); big.style.color = tone; val.append(big, h("span", "kt-unit", TRIG_UNIT[g.tr] || "/roll"));
+      if (ratio < 0.995) val.append(h("span", "kt-max", `max ${fmtPct(top)}`));
+      val.title = `Chance that at least one of ${g.who.length} pet(s) procs. It is 1 minus the chance every pet misses, not a sum.`;
+      const bar = h("div", "kt-bar"), fill = h("i"); fill.style.width = `${Math.max(2, ratio * 100)}%`; fill.style.background = tone; bar.append(fill); box.append(val, bar);
+    }
+    if (key) {
+      const vals = g.who.map((w) => w.params[key]).filter((v) => typeof v === "number" && v !== 0);
+      if (vals.length) { const lo = fmtAmt(Math.min(...vals), STAT_LABEL[key][1]), hi = fmtAmt(Math.max(...vals), STAT_LABEL[key][1]); box.append(h("div", "kt-proc", `<span>per proc</span><b>${esc(lo === hi ? hi : `${lo} – ${hi}`)}</b>`)); }
+    }
+    return box;
+  }
+  function statCarousel(groups) {
+    const host = h("div", "kt-car"); if (!groups.length) return host; let i = 0;
+    const paint = () => host.replaceChildren(statPanel(groups[i], groups.length > 1 ? { i, n: groups.length, step: (d) => { i = (i + d + groups.length) % groups.length; paint(); } } : null)); paint(); return host;
+  }
+  function feedRow(feed) {
+    const row = h("div", "kt-feed"); let text = "unknown", tone = "#9fc0ae";
+    if (feed.status === "sustained") { text = "indefinitely"; tone = "#86efac"; } else if (feed.status === "runs-out") { text = `~${fmtLasts(feed.mins)}`; tone = feed.mins < 60 ? "#fcd34d" : "#86efac"; }
+    row.title = "Starting from full. Restore figures are averages, so a bad run of luck can still empty a pet.";
+    row.append(h("span", "", "Lasts without feeding")); const v = h("b", "", text); v.style.color = tone; row.append(v); return row;
+  }
+  function builderCard(team, goal, isOn, act) {
+    const card = h("article", "kt-card"); card.dataset.on = String(isOn);
+    const covered = [...new Set(team.flatMap((p) => p.abilities.filter((a) => goal.abil.includes(a))))], tones = covered.map(abilityTone);
+    const strip = h("i", "kt-strip"); strip.style.background = tones.length > 1 ? `linear-gradient(180deg,${tones.join(",")})` : tones[0] || "var(--ac)";
+    const afk = covered.length > 0 && covered.every((a) => { const s = abilityAt(a, 1); return s && s.tr === "continuous" && !s.weather; });
+    const head = h("div", "kt-head", `<span class="kt-emoji">${goal.emoji}</span><div class="kt-title"><b>${esc(goal.name)}</b><small>${esc(covered.map((a) => abilInfo(a).n).join(", ") || "Your strongest pets")}</small></div>`);
+    if (afk) { const p = h("span", "kt-afk", "AFK"); p.title = "Every ability this team is built on works while you are away."; head.append(p); }
+    const pets = h("div", "kt-pets");
+    for (const p of team) {
+      const row = h("div", "kt-pet"), full = p.maxStrength > 0 && p.strength >= p.maxStrength, pct = p.maxStrength ? Math.round((p.strength / p.maxStrength) * 100) : 0;
+      const info = h("div", "kt-pet-i", `<b>${esc(p.name || KD.pets[p.species]?.n || p.species)}</b>`), dots = h("span", "kt-dots");
+      for (const a of p.abilities) { const d = h("i"); d.style.background = abilityTone(a); d.title = abilInfo(a).n; dots.append(d); }
+      info.append(dots);
+      const str = h("div", "kt-str"); str.dataset.max = String(full); str.title = "Strength (current/max)"; str.append(h("b", "", `${p.strength}/${p.maxStrength}`)); const bar = h("span"); bar.style.width = `${pct}%`; str.append(bar);
+      row.append(spr(petUrls(p), 34, EMOJI.pet, "kt-face"), info, str); pets.append(row);
+    }
+    const stats = teamStats(team), focusKeys = new Set(covered.map((a) => { const s = abilityAt(a, 1); return s ? effKey(s) : null; }).filter(Boolean));
+    const focus = stats.groups.filter((g) => focusKeys.has(g.key)), panel = statCarousel(focus.length ? focus : stats.groups);
+    const foot = h("div", "kt-foot"), go = h("button", "kx-btn", isOn ? "Out now" : "Send out"); go.type = "button"; go.disabled = isOn; go.onclick = () => act(team, goal, true);
+    const sv = h("button", "kx-btn ghost", "Save"); sv.type = "button"; sv.title = "Save as a team in the Teams tab"; sv.onclick = () => act(team, goal, false); foot.append(go, sv);
+    card.append(strip, head, pets, panel, feedRow(stats.feed), foot); return card;
+  }
   function petsSuggest(body, win) {
-    const note = h("p", "kx-muted", "Picked from every pet you own. One slot goes to a pet that keeps the team fed when you have one."); const list = h("div", "kx-teams"); body.append(note, list); win.setSub("Best three pets for what you want to do");
+    const bar = h("div", "kt-bar-top"), note = h("span", "kx-muted", "Built from every pet you own, best first. Send a team out or save it for later."), refresh = h("button", "kx-btn ghost", "Refresh"); refresh.type = "button"; bar.append(note, refresh);
+    const list = h("div", "kt-grid"); body.append(bar, list); win.setSub("Best three pets for what you want to do");
     let me = null;
     const give = (team, goal, sendOut) => {
-      const ids = team.map((p) => p.id); const name = goal.name.slice(0, 16); const existing = (me?.teams || []).find((t) => t.name === name);
-      const id = existing?.id || randomId();
+      const ids = team.map((p) => p.id), name = goal.name.slice(0, 16), existing = (me?.teams || []).find((t) => t.name === name), id = existing?.id || randomId();
       if (!sendGame({ type: "SavePetTeam", teamId: id, isCreate: !existing, name, petIds: ids })) { toast("Could not reach the game", "Reload the page and try again.", { emoji: "⚠️", kind: "warn" }); return; }
       if (!sendOut) { toast("Team saved", name, { emoji: "💾" }); return; }
       setTimeout(() => { sendGame({ type: "ApplyPetTeam", teamId: id }); toast("Switching team", name, { emoji: "🔄" }); }, 900);
     };
-    async function update() {
+    async function update(force) {
       me = await readMine(); if (!me) return;
-      const sig = JSON.stringify([me.pets.map((p) => [p.id, p.strength, p.abilities.join()]), me.active.map((p) => p.id)]); if (sig === list.dataset.sig) return; list.dataset.sig = sig; list.replaceChildren();
+      const sig = JSON.stringify([me.pets.map((p) => [p.id, p.strength, p.abilities.join()]), me.active.map((p) => p.id), liveLoaded]); if (!force && sig === list.dataset.sig) return; list.dataset.sig = sig; list.replaceChildren();
       if (!me.pets.length) { list.append(empty("🐾", "No pets yet", "Hatch a few and suggestions appear here.")); return; }
       let shown = 0;
       for (const goal of TEAM_GOALS) {
         const team = suggestTeam(me.pets, goal); if (!team) continue; shown++;
-        const isOn = sameIds(team.map((p) => p.id), me.active.map((p) => p.id)), row = h("div", "kx-team"); row.dataset.on = String(isOn);
-        const faces = h("div", "kx-faces"); for (const m of team) faces.append(spr(petUrls(m), 44, EMOJI.pet, "kx-face"));
-        const covers = [...new Set(team.flatMap((p) => p.abilities.filter((a) => goal.abil.includes(a))))].map(abilityName).join(", ");
-        const info = h("div", "kx-team-i", `<b>${goal.emoji} ${esc(goal.name)}</b><span>${esc(covers || "Your strongest pets")} · ${team.reduce((a, p) => a + p.strength, 0)} strength${isOn ? " · out now" : ""}</span>`);
-        const go = h("button", "kx-btn", isOn ? "Out now" : "Send out"); go.type = "button"; go.disabled = isOn; go.onclick = () => give(team, goal, true);
-        const sv = h("button", "kx-btn ghost", "Save"); sv.type = "button"; sv.onclick = () => give(team, goal, false);
-        row.append(faces, info, go, sv); list.append(row);
+        try { list.append(builderCard(team, goal, sameIds(team.map((p) => p.id), me.active.map((p) => p.id)), give)); } catch (error) { console.warn("[King's Mod] team builder", error); shown--; }
       }
       if (!shown) list.append(empty("🔍", "No matches yet", "None of your pets have abilities for these goals."));
     }
-    update(); return { update };
+    refresh.onclick = () => { win.setSub("Looking at your pets…"); update(true).then(() => win.setSub("Best three pets for what you want to do")); };
+    update(); return { update: () => update(false) };
   }
 
-  createWin({ id: "pets", title: "Pet Deck", icon: "deck", accent: ["#f4978a", "#f7c59f"], w: 600, h: 600, every: 1500, tabs: [{ id: "active", label: "Out now", render: petsActive }, { id: "teams", label: "Teams", render: petsTeams }, { id: "best", label: "Suggested", render: petsSuggest }, { id: "all", label: "Collection", render: petsCollection }, { id: "log", label: "Ability log", render: petsLog }] });
+  createWin({ id: "pets", title: "Pet Deck", icon: "deck", accent: ["#f4978a", "#f7c59f"], w: 600, h: 600, every: 1500, tabs: [{ id: "active", label: "Out now", render: petsActive }, { id: "teams", label: "Teams", render: petsTeams }, { id: "best", label: "Team Builder", render: petsSuggest }, { id: "all", label: "Collection", render: petsCollection }, { id: "log", label: "Ability log", render: petsLog }] });
 
-  // ---------- Room: who is here, what they hold, and a ride to their garden ----------
+  // ---------- Room: same layout and behaviour as Arie's Room menu ----------
+  // Players on the left. On the right: a hero card (avatar, Visit garden, inventory and garden value), "Look inside"
+  // buttons that open the GAME'S OWN Inventory / Journal / Stats / Activity log windows showing that player's data,
+  // and a "More" card. The game windows are fed by lending the game the player's data only while that window is open.
   const arr = (v) => (Array.isArray(v) ? v : []);
   function roomPlayers(state) {
     const direct = state?.fullState?.data?.players ?? state?.data?.players ?? state?.players; let players = Array.isArray(direct) ? direct : [];
@@ -976,7 +1080,7 @@
   }
   const slotOwner = (slot) => { const r = slot?.userId ?? slot?.playerId ?? slot?.id; return r != null ? String(r) : ""; };
   async function roomList() {
-    const state = await readRoomState(); if (!state) return { players: [], slots: [], state: null };
+    const state = await readRoomState(); if (!state) return { players: [], slots: [], state: null, cols: 81 };
     const players = roomPlayers(state), slots = roomSlots(state), byId = new Map(players.map((p) => [String(p.id), p])), ordered = [], seen = new Set();
     for (const s of slots) { const id = slotOwner(s); const p = byId.get(id); if (p && !seen.has(id)) { ordered.push({ ...p, slot: s }); seen.add(id); } }
     for (const p of players) if (!seen.has(String(p.id))) ordered.push({ ...p, slot: null });
@@ -986,72 +1090,177 @@
   const peopleNow = async (fallback) => { const n = Math.floor(Number(await atomValue("numPlayersAtom"))); return Number.isFinite(n) && n > 0 ? clamp(n, 1, 6) : clamp(fallback || 1, 1, 6); };
   function gardenWorth(slot, people) { let sum = 0; for (const t of Object.values(slot?.data?.garden?.tileObjects || {})) { if (t?.objectType !== "plant") continue; for (const s of arr(t.slots)) { const sz = readCropSize({ ...s, species: s?.species || t.species }); if (sz != null) sum += cropValue(s?.species || t.species, sz, s?.mutations, people); } } return sum; }
   function invWorth(slot, people) { let sum = 0; for (const it of arr(slot?.data?.inventory?.items)) { if (it?.itemType !== "Produce") continue; const sz = readCropSize(it); if (sz != null) sum += cropValue(it.species, sz, it.mutations, people); } return sum; }
+  function fmtPrice(n) {
+    if (!Number.isFinite(n)) return "—"; const a = Math.abs(n);
+    for (const [v, s] of [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]]) if (a >= v) return `${(n / v).toFixed(2).replace(/\.?0+$/, "")}${s}`;
+    return String(Math.round(n));
+  }
   function avatar(p, big) {
     const a = h("span", `kx-av${big ? " big" : ""}`); if (p.discordAvatarUrl) a.style.backgroundImage = `url(${p.discordAvatarUrl})`; else a.textContent = (p.name || "?").charAt(0).toUpperCase();
     a.append(h("i", p.isConnected ? "on" : "")); a.title = p.isConnected ? "Online" : "Offline"; return a;
   }
   function visitGarden(p, cols) {
-    if (p.tile == null) { toast("No garden spot", "This player has no garden position yet.", { emoji: "📍", kind: "warn" }); return; }
+    if (p.tile == null) { toast("Teleport", "No garden position for this player.", { emoji: "📍", kind: "warn" }); return; }
     const x = p.tile % cols, y = Math.floor(p.tile / cols);
-    (async () => { try { const s = await getStore(), a = findAtom("positionAtom"); if (s && a) s.set(a, { x, y }); } catch {} sendGame({ type: "Teleport", position: { x, y } }); toast("Off you go", `${p.name || "Their"} garden`, { emoji: "🚪" }); })();
+    (async () => {
+      try { const s = await getStore(), a = findAtom("positionAtom"); if (s && a) await s.set(a, { x, y }); } catch {}
+      const sent = sendGame({ type: "Teleport", position: { x, y } });
+      if (sent) toast("Teleport", `Teleported to ${p.name || "their"} garden`, { emoji: "🚪" }); else toast("Teleport", "Could not reach the game. Reload the page and try again.", { emoji: "⚠️", kind: "warn" });
+    })();
   }
-  function itemTile(it, people) {
-    const t = h("div", "kx-it"); let urls = [], emoji = "📦", name = pretty(it.itemType), sub = "", tip = "";
-    switch (it.itemType) {
-      case "Produce": { const sz = readCropSize(it) ?? 50; urls = SPR.crop(it.species, arr(it.mutations).map((m) => MUT_ID[normMut(m)] || m)); emoji = EMOJI.crop; name = KD.crops[it.species]?.n || pretty(it.species); sub = `🪙 ${fmtShort(cropValue(it.species, sz, it.mutations, people))}`; tip = `${sz}% size`; break; }
-      case "Seed": urls = SPR.seed(it.species); emoji = EMOJI.seed; name = KD.crops[it.species]?.sn || pretty(it.species); sub = `×${it.quantity ?? 1}`; break;
-      case "Egg": urls = SPR.egg(it.eggId); emoji = EMOJI.egg; name = KD.eggs[it.eggId]?.n || pretty(it.eggId); sub = `×${it.quantity ?? 1}`; break;
-      case "Tool": urls = SPR.tool(it.toolId); emoji = EMOJI.tool; name = KD.tools[it.toolId]?.n || pretty(it.toolId); sub = `×${it.quantity ?? 1}`; break;
-      case "Decor": urls = SPR.decor(it.decorId); emoji = EMOJI.decor; name = KD.decor[it.decorId]?.n || pretty(it.decorId); sub = `×${it.quantity ?? 1}`; break;
-      case "Pet": { const p = normPet(it, ""); if (p) { urls = petUrls(p); emoji = EMOJI.pet; name = p.name || KD.pets[p.species]?.n || p.species; sub = `${p.strength} str`; } break; }
+
+  // ----- the game's own windows (the same trick Arie's mod uses) -----
+  const FAKE = new Map();
+  const modalName = (v) => (v && typeof v === "object" && "modal" in v ? (v.modal ?? null) : typeof v === "string" ? v : null);
+  const modalAtom = () => findAtom("activeModalStateAtom") || findAtom("activeModalAtom");
+  const atomsNamed = (label) => { const out = [], cache = PW.jotaiAtomCache?.cache; if (!cache?.values) return out; for (const a of cache.values()) if (a?.debugLabel === label || a?.label === label) out.push(a); return out; };
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+  async function modalNow() { const s = await getStore(), a = modalAtom(); return s && a ? modalName(await readAtom(s, a)) : null; }
+  async function setModal(next) {
+    const s = await getStore(), a = modalAtom(); if (!s || !a) throw new Error("The game's windows are not ready yet.");
+    const raw = await readAtom(s, a); if (modalName(raw) === next) return;
+    const stateShape = raw && typeof raw === "object" && "modal" in raw;
+    await s.set(a, stateShape ? { modal: next, openId: (Number.isFinite(raw.openId) ? raw.openId : 0) + 1 } : next);
+  }
+  async function setInventoryFlag(on) { const s = await getStore(), a = findAtom("inventoryModalIsActiveAtom"); if (s && a) { try { await s.set(a, on); } catch {} } }
+  // Wraps the game's reader for one data atom. While "on" and the matching window is open it returns the lent data;
+  // the moment that window closes it hands back the player's real data.
+  function fakeFor(key, label, merge, windowOk) {
+    let st = FAKE.get(key); if (st) return st;
+    const atoms = atomsNamed(label); if (!atoms.length) return null;
+    st = { on: false, payload: null, atoms: [] }; const gate = modalAtom();
+    for (const a of atoms) {
+      const orig = a.read; if (typeof orig !== "function") continue;
+      a.read = function (get, ...rest) {
+        let open = true; try { if (gate) open = windowOk(modalName(get(gate))); } catch {}
+        const real = orig.call(this, get, ...rest);
+        if (!st.on || st.payload == null || !open) return real;
+        return real && typeof real.then === "function" ? real.then((r) => merge(r, st.payload)) : merge(real, st.payload);
+      };
+      st.atoms.push(a);
     }
-    t.append(spr(urls, 40, emoji), h("b", "", esc(name)), h("span", "", esc(sub))); if (tip) t.title = tip; return t;
+    if (!st.atoms.length) return null; FAKE.set(key, st); return st;
   }
-  function roomInventory(slot, people) {
-    const items = arr(slot?.data?.inventory?.items); const wrap = h("div", "kx-grid"); if (!items.length) return empty("🎒", "Empty backpack", "Nothing in this inventory yet.");
-    const order = ["Produce", "Pet", "Seed", "Egg", "Tool", "Decor"]; items.sort((a, b) => order.indexOf(a.itemType) - order.indexOf(b.itemType));
-    for (const it of items) wrap.append(itemTile(it, people)); return wrap;
+  const FAKE_SPECS = [
+    ["data", "myDataAtom", (real, p) => ({ ...(real && typeof real === "object" ? real : {}), ...(p && typeof p === "object" ? p : {}) }), (m) => m === "inventory" || m === "journal" || m === "activityLog"],
+    ["inv", "myInventoryAtom", (_real, fake) => fake, (m) => m === "inventory"]
+  ];
+  function installFakes() { return FAKE_SPECS.map(([k, l, m, w]) => fakeFor(k, l, m, w)); }
+  function fakesOff() { for (const st of FAKE.values()) { st.on = false; st.payload = null; } }
+  async function showInGame(kind, payload) {
+    const [dataFake, invFake] = installFakes(); if (!dataFake) throw new Error("This game version does not expose its data yet.");
+    const field = { inventory: "inventory", journal: "journal", stats: "stats", log: "activityLogs" }[kind];
+    if (invFake) { invFake.on = kind === "inventory"; invFake.payload = kind === "inventory" ? payload : null; }
+    dataFake.payload = { [field]: payload }; dataFake.on = true;
+    const s = await getStore(); for (const a of [...dataFake.atoms, ...(invFake?.atoms || [])]) { try { s.get(a); } catch {} }
+    const target = kind === "inventory" ? "inventory" : kind === "journal" ? "journal" : "activityLog";
+    if (target === "activityLog") { const t = findAtom("activityLogTabAtom"); if (t) { try { await s.set(t, kind === "stats" ? "stats" : "logs"); } catch {} } }
+    const cur = await modalNow(); if (cur && cur !== target) { await setModal(null); await setInventoryFlag(false); await nextFrame(); }
+    await setModal(target); await setInventoryFlag(target === "inventory");
+    return target;
   }
-  function roomJournal(slot) {
-    const j = slot?.data?.journal ?? slot?.journal; const prod = j?.produce || {}, pets = j?.pets || {}; if (!Object.keys(prod).length && !Object.keys(pets).length) return empty("📖", "Journal is blank", "No discoveries recorded for this player.");
-    const wrap = h("div", "kx-jr"); const sec = (title, entries, urlOf, nameOf, emoji) => { wrap.append(h("h4", "", esc(title))); const g = h("div", "kx-grid"); for (const [k, v] of entries) { const n = arr(v?.variantsLogged).length + arr(v?.abilitiesLogged).length; const t = h("div", "kx-it"); t.append(spr(urlOf(k), 40, emoji), h("b", "", esc(nameOf(k))), h("span", "", `${n} logged`)); g.append(t); } wrap.append(g); };
-    sec(`Crops · ${Object.keys(prod).length}`, Object.entries(prod), SPR.crop, (k) => KD.crops[k]?.n || pretty(k), EMOJI.crop); sec(`Pets · ${Object.keys(pets).length}`, Object.entries(pets), (k) => SPR.pet(k), (k) => KD.pets[k]?.n || pretty(k), EMOJI.pet); return wrap;
+  async function waitModalClosed(id, ms = 120000) { const t0 = performance.now(); while (performance.now() - t0 < ms) { if ((await modalNow()) !== id) return true; await new Promise((r) => setTimeout(r, 120)); } return false; }
+  const journalPayload = (slot) => {
+    const j = slot?.data?.journal ?? slot?.journal; if (!j || typeof j !== "object") return null; const out = {};
+    if (j.produce && typeof j.produce === "object") out.produce = Object.fromEntries(Object.entries(j.produce).map(([k, v]) => [String(k), { variantsLogged: arr(v?.variantsLogged) }]));
+    if (j.pets && typeof j.pets === "object") out.pets = Object.fromEntries(Object.entries(j.pets).map(([k, v]) => [String(k), { variantsLogged: arr(v?.variantsLogged), abilitiesLogged: arr(v?.abilitiesLogged) }]));
+    const any = (o, f) => !!o && Object.values(o).some(f);
+    return any(out.produce, (s) => s.variantsLogged.length) || any(out.pets, (s) => s.variantsLogged.length || s.abilitiesLogged.length) ? out : null;
+  };
+  const INSPECT = {
+    inventory: { title: "Inventory", noun: "inventory", get: (slot) => { const inv = slot?.data?.inventory; if (!inv || typeof inv !== "object") return { err: "No inventory object found for this player." }; const items = arr(inv.items); if (!items.length) return { err: "Inventory is empty for this player.", info: true }; return { payload: { items, favoritedItemIds: arr(inv.favoritedItemIds) } }; } },
+    journal: { title: "Journal", noun: "journal", get: (slot) => { const j = journalPayload(slot); return j ? { payload: j } : { err: "No journal data for this player." }; } },
+    stats: { title: "Stats", noun: "stats", get: (slot) => { const st = slot?.data?.stats ?? slot?.stats; return st && typeof st === "object" ? { payload: st } : { err: "No stats found for this player." }; } },
+    log: { title: "Activity log", noun: "activity log", get: (slot) => { const l = slot?.data?.activityLogs ?? slot?.activityLogs; return Array.isArray(l) && l.length ? { payload: l } : { err: "No activity logs for this player.", info: true }; } }
+  };
+  async function inspectPlayer(win, playerId, kind) {
+    const spec = INSPECT[kind]; let who = "", fresh = null;
+    try { const list = await roomList(); fresh = list.players.find((x) => String(x.id) === String(playerId)) || null; who = fresh?.name || ""; } catch {}
+    if (!fresh) { toast(spec.title, "This player is not in the room any more.", { emoji: "👥", kind: "warn" }); return; }
+    const got = spec.get(fresh.slot); if (got.err) { toast(spec.title, got.err, { emoji: got.info ? "ℹ️" : "⚠️", kind: got.info ? "info" : "warn" }); return; }
+    const root = win.root; root.style.display = "none";
+    try {
+      const target = await showInGame(kind, got.payload);
+      if (who) toast(spec.title, `${who}'s ${spec.noun} displayed.`, { emoji: "🔎", ms: 2800 });
+      if ((await modalNow()) === target) await waitModalClosed(target);
+    } catch (error) { console.warn("[King's Mod] room", error); toast(spec.title, String(error?.message || "Could not open it."), { emoji: "⚠️", kind: "warn" }); }
+    finally { fakesOff(); if (win.isOpen()) root.style.display = "flex"; }
   }
-  function roomStats(slot) {
-    const st = slot?.data?.stats ?? slot?.stats; const rows = Object.entries(st || {}).filter(([, v]) => typeof v === "number"); if (!rows.length) return empty("📊", "No stats", "Nothing counted for this player yet.");
-    const wrap = h("div", "kx-stats"); for (const [k, v] of rows.sort((a, b) => b[1] - a[1])) wrap.append(h("div", "", `<span>${esc(pretty(k))}</span><b>${fmtCoins(v)}</b>`)); return wrap;
+  async function saveGarden(playerId) {
+    let p = null; try { p = (await roomList()).players.find((x) => String(x.id) === String(playerId)) || null; } catch {}
+    const name = p?.name || playerId, fn = PW.qwsEditorSaveGardenForPlayer || window.qwsEditorSaveGardenForPlayer;
+    if (typeof fn === "function") { try { const saved = await fn(playerId, `${name}'s garden`); if (saved) toast("Save garden", `Saved "${saved.name}".`, { emoji: "💾" }); else toast("Save garden", "Save failed (no garden state).", { emoji: "⚠️", kind: "warn" }); } catch (error) { toast("Save garden", String(error?.message || "Save failed."), { emoji: "⚠️", kind: "warn" }); } return; }
+    const garden = p?.slot?.data?.garden; if (!garden) { toast("Save garden", "No garden data for this player.", { emoji: "⚠️", kind: "warn" }); return; }
+    try {
+      const blob = new Blob([JSON.stringify({ player: name, savedAt: new Date().toISOString(), garden }, null, 1)], { type: "application/json" }), url = URL.createObjectURL(blob), a = document.createElement("a");
+      a.href = url; a.download = `${String(name).replace(/[^\w-]+/g, "_")}-garden.json`; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast("Save garden", `Downloaded ${name}'s garden.`, { emoji: "💾" });
+    } catch (error) { toast("Save garden", String(error?.message || "Save failed."), { emoji: "⚠️", kind: "warn" }); }
   }
+  const RIC = {
+    teleport: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/>',
+    garden: '<polygon points="12 3 20 15 4 15"/><polygon points="12 9 21 21 3 21"/><rect x="10" y="21" width="4" height="3" rx="1"/>',
+    inventory: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-4 0v2"/>',
+    journal: '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
+    stats: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+    log: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+    save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13"/><polyline points="7 3 7 8 15 8"/>',
+    follow: '<path d="M5 12h14"/><path d="M12 5l7 7-7 7"/>'
+  };
+  const ricon = (name) => { const s = h("span", "kr-ic"); s.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${RIC[name] || ""}</svg>`; return s; };
+  function rbtn(label, icon, onClick, o = {}) {
+    const b = h("button", `kx-btn kr-btn${o.primary ? " primary" : ""}${o.off ? " off" : ""}`); b.type = "button"; if (icon) b.append(ricon(icon)); b.append(document.createTextNode(label));
+    if (o.tip) b.title = o.tip; let busy = false;
+    b.onclick = async () => { if (busy) return; busy = true; b.disabled = true; try { await onClick(); } catch (error) { console.warn("[King's Mod] room", error); } finally { busy = false; b.disabled = false; } }; return b;
+  }
+  function rcard(title, sub) { const c = h("section", "kr-card"); if (title) c.append(h("div", "kr-card-h", `<h4>${esc(title)}</h4>${sub ? `<span>${esc(sub)}</span>` : ""}`)); return c; }
+  function rrow(title, sub, controls) { const r = h("div", "kr-row"), t = h("div", "kr-row-t", `<b>${esc(title)}</b><span>${esc(sub)}</span>`), c = h("div", "kr-row-c"); c.append(...[].concat(controls)); r.append(t, c); return r; }
+  const NO_POSITION = "Temporarily unavailable: the game no longer exposes player positions.";
   function renderRoom(body, win) {
-    body.classList.add("kx-roomb"); const side = h("div", "kx-guests"), main = h("div", "kx-guest"); body.append(side, main);
-    let data = { players: [], cols: 81 }, picked = null, sub = "inv", lastSig = "";
-    let showSeq = 0;
-    function showGuest() {
+    const wrap = h("div", "kr-split"), side = h("div", "kr-side"), main = h("div", "kr-main"); wrap.append(side, main); body.append(wrap);
+    try { installFakes(); } catch {}   // set up early so the game has already read through them by the time a window is opened
+    let data = { players: [], cols: 81 }, picked = null, lastSig = "", showSeq = 0;
+    function showPlayer() {
       const p = data.players.find((x) => String(x.id) === picked), seq = ++showSeq; main.replaceChildren();
-      if (!p) { main.append(empty("👥", data.players.length ? "Pick a guest" : "Nobody here yet", "Players show up as they join the room.")); return; }
+      if (!p) { main.append(empty("👥", data.players.length ? "No player selected" : "Nobody here yet", data.players.length ? "Pick someone in the list." : "Players show up here as they join the room.")); return; }
       try {
-        const people = clamp(data.players.length || 1, 1, 6);
-        const head = h("div", "kx-ghead"); head.append(avatar(p, true), h("div", "kx-gname", `<h3>${esc(p.name || p.id)}</h3><span>${p.isConnected ? "Online" : "Offline"}${p.slot ? "" : " · no garden data yet"}</span>`));
-        const go = h("button", "kx-btn", "Visit garden"); go.type = "button"; go.onclick = () => visitGarden(p, data.cols); head.append(go);
-        const safe = (fn) => { try { return fn(); } catch (error) { console.warn("[King's Mod] room", error); return 0; } };
-        const vals = h("div", "kx-vals", `<div><span>Backpack crops</span><b>🪙 ${fmtShort(safe(() => invWorth(p.slot, people)))}</b></div><div><span>Garden crops</span><b>🪙 ${fmtShort(safe(() => gardenWorth(p.slot, people)))}</b></div>`);
-        const content = h("div", "kx-gc");
-        const fill = () => { let node; try { node = sub === "inv" ? roomInventory(p.slot, people) : sub === "jr" ? roomJournal(p.slot) : roomStats(p.slot); } catch (error) { console.warn("[King's Mod] room", error); node = empty("⚠️", "Could not show this", String(error?.message || error)); } content.replaceChildren(node); };
-        const seg = segmented([{ label: "Backpack", value: "inv" }, { label: "Journal", value: "jr" }, { label: "Stats", value: "st" }], sub, (v) => { sub = v; fill(); });
-        main.append(head, vals, seg, content); fill();
-        peopleNow(data.players.length).then((n) => { if (seq !== showSeq || n === people) return; vals.innerHTML = `<div><span>Backpack crops</span><b>🪙 ${fmtShort(safe(() => invWorth(p.slot, n)))}</b></div><div><span>Garden crops</span><b>🪙 ${fmtShort(safe(() => gardenWorth(p.slot, n)))}</b></div>`; fill2(n); }).catch(() => {});
-        function fill2(n) { if (sub === "inv") { try { content.replaceChildren(roomInventory(p.slot, n)); } catch {} } }
-      } catch (error) { console.error("[King's Mod] room", error); main.replaceChildren(empty("⚠️", "Could not open this guest", String(error?.message || error))); }
+        const hero = rcard(), top = h("div", "kr-hero-top"), who = h("div", "kr-who");
+        who.append(h("div", "kr-name", esc(p.name || p.id)), h("span", `kr-pill${p.isConnected ? " ok" : ""}`, p.isConnected ? "Online" : "Offline"));
+        top.append(avatar(p, true), who, rbtn("Visit garden", "garden", () => visitGarden(p, data.cols), { primary: true }));
+        const tile = (label) => { const t = h("div"), amount = h("b"); amount.textContent = "…"; t.append(h("span", "", esc(label)), amount); return { t, amount }; };
+        const invTile = tile("Inventory value"), gardTile = tile("Garden value"), vals = h("div", "kx-vals"); vals.append(invTile.t, gardTile.t);
+        hero.append(top, vals);
+        (async () => {
+          try {
+            let n = clamp(data.players.length || 1, 1, 6); try { n = await peopleNow(n); } catch {}
+            if (seq !== showSeq) return; const put = (t, fn) => { let text = "—"; try { text = fmtPrice(Math.round(fn())); } catch {} t.amount.textContent = text; };
+            put(invTile, () => invWorth(p.slot, n)); put(gardTile, () => gardenWorth(p.slot, n));
+          } catch (error) { console.warn("[King's Mod] room", error); }
+        })();
+        const look = rcard("Look inside", "Opens in the game's own window."), grid = h("div", "kr-inspect");
+        for (const [label, icon, kind] of [["Inventory", "inventory", "inventory"], ["Journal", "journal", "journal"], ["Stats", "stats", "stats"], ["Activity log", "log", "log"]]) grid.append(rbtn(label, icon, () => inspectPlayer(win, p.id, kind)));
+        look.append(grid);
+        const more = rcard("More"), hasEditor = typeof (PW.qwsEditorSaveGardenForPlayer || window.qwsEditorSaveGardenForPlayer) === "function";
+        const travel = [rbtn("To player", "teleport", () => toast("Unavailable", NO_POSITION, { emoji: "ℹ️" }), { off: true, tip: NO_POSITION }), rbtn("Follow", "follow", () => toast("Unavailable", NO_POSITION, { emoji: "ℹ️" }), { off: true, tip: NO_POSITION })];
+        more.append(rrow("Save garden", hasEditor ? "Keeps a copy in the Editor." : "Downloads a copy as a file.", rbtn("Save", "save", () => saveGarden(p.id))), rrow("Go to player", "Paused while the game hides where players are.", travel));
+        main.append(hero, look, more);
+      } catch (error) { console.error("[King's Mod] room", error); main.replaceChildren(empty("⚠️", "Could not open this player", String(error?.message || error))); }
     }
     function drawSide() {
-      side.replaceChildren(); for (const p of data.players) { const b = h("button", "kx-gb"); b.type = "button"; b.dataset.on = String(String(p.id) === picked); b.append(avatar(p), h("span", "", `<b>${esc(p.name || p.id)}</b><small>${p.isConnected ? "Online" : "Offline"}</small>`)); b.onclick = () => { picked = String(p.id); drawSide(); showGuest(); }; side.append(b); }
+      side.replaceChildren(); side.append(h("div", "kr-side-h", `<span>Players</span><em class="kr-count">${data.players.length}</em>`));
+      const list = h("div", "kr-list"); side.append(list);
+      if (!data.players.length) { list.append(h("div", "kx-muted", "No one yet.")); return; }
+      for (const p of data.players) { const b = h("button", "kx-gb"); b.type = "button"; b.dataset.on = String(String(p.id) === picked); b.title = p.name || String(p.id); b.append(avatar(p), h("span", "", `<b>${esc(p.name || p.id)}</b><small>${p.isConnected ? "Online" : "Offline"}</small>`)); b.onclick = () => { picked = String(p.id); drawSide(); showPlayer(); }; list.append(b); }
     }
     async function update() {
-      data = await roomList(); const sig = data.players.map((p) => `${p.id}|${p.name}|${p.isConnected ? 1 : 0}`).join(";"); win.setSub(`${data.players.length} in the room · +${(clamp(data.players.length, 1, 6) - 1) * 10}% friend bonus`);
-      if (sig === lastSig) return; lastSig = sig; if (!picked || !data.players.some((p) => String(p.id) === picked)) picked = data.players[0] ? String(data.players[0].id) : null; drawSide(); showGuest();
+      try { data = await roomList(); } catch (error) { console.warn("[King's Mod] room", error); return; }
+      const sig = data.players.map((p) => `${p.id}|${p.name}|${p.isConnected ? 1 : 0}`).join(";"); win.setSub(`${data.players.length} player${data.players.length === 1 ? "" : "s"} in this room`);
+      if (sig === lastSig && main.childElementCount) return; lastSig = sig;
+      if (!picked || !data.players.some((p) => String(p.id) === picked)) picked = data.players[0] ? String(data.players[0].id) : null; drawSide(); showPlayer();
     }
     update(); return { update };
   }
-  createWin({ id: "room", title: "Room", icon: "room", accent: ["#7cc4f0", "#a8e6cf"], w: 620, h: 580, every: 3000, tabs: [{ id: "guests", label: "Guests", render: renderRoom }] });
+  createWin({ id: "room", title: "Room", icon: "room", accent: ["#7cc4f0", "#a8e6cf"], w: 620, h: 600, every: 3000, tabs: [{ id: "guests", label: "Players", render: renderRoom }] });
 
   // ---------- Alerts: shop restocks, weather and hungry pets ----------
     const AL = Object.assign({ enabled: true, sound: "chime", volume: 0.6, toasts: true, repeat: false, every: 20, follow: {}, weather: {}, hunger: { on: true, pct: 25, muted: {} } }, readJson(ALERT_KEY) || {});
@@ -1245,6 +1454,42 @@
 .kx-toast-ic{flex:none;display:grid;place-items:center;width:38px;height:38px;border-radius:12px;background:rgba(255,255,255,.07);font-size:20px}.kx-toast-tx{flex:1;min-width:0;display:grid;gap:1px}.kx-toast-tx b{font:700 13px Georgia,serif;color:#fde68a}.kx-toast-tx span{color:#a9c4b4}.kx-toast-x{border:0;background:none;color:#a9c4b4;font-size:17px;cursor:pointer}
 @keyframes kx-in{from{opacity:0;transform:translateY(-10px)}}
 @media (prefers-reduced-motion:reduce){.kx-toast,.kx-crop{animation:none;transition:none}}
+.kr-split{display:grid;grid-template-columns:minmax(130px,176px) minmax(0,1fr);gap:12px;align-items:start}
+@container (max-width:470px){.kr-split{grid-template-columns:minmax(0,1fr)}.kr-list{flex-direction:row!important;overflow-x:auto;padding-bottom:4px}.kr-list .kx-gb{max-width:150px}}
+.kr-side{display:grid;gap:8px;align-content:start;min-width:0}.kr-side-h{display:flex;align-items:center;justify-content:space-between;padding:0 4px;font:800 10.5px "Trebuchet MS",system-ui,sans-serif;letter-spacing:.09em;text-transform:uppercase;color:#9fc0ae}
+.kr-count{font-style:normal;padding:1px 8px;border-radius:99px;background:rgba(255,255,255,.1);color:#e8f6ec;letter-spacing:0}
+.kr-list{display:flex;flex-direction:column;gap:5px}.kr-main{display:grid;gap:12px;min-width:0}
+.kr-card{display:grid;gap:11px;padding:13px 14px;border-radius:18px;background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.1)}
+.kr-card-h{display:grid;gap:2px}.kr-card-h h4{margin:0;font:700 15px Georgia,serif;color:#fff}.kr-card-h span{font-size:11.5px;color:#9fc0ae}
+.kr-hero-top{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.kr-who{flex:1 1 110px;min-width:0;display:grid;justify-items:start;gap:5px}
+.kr-name{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:700 19px Georgia,serif;color:#fff}
+.kr-pill{padding:2px 10px;border-radius:99px;background:rgba(255,255,255,.1);color:#cfe0d5;font-size:10.5px;font-weight:800}.kr-pill.ok{background:rgba(74,222,128,.16);border:1px solid rgba(74,222,128,.4);color:#86efac}
+.kr-inspect{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.kr-btn{display:inline-flex;align-items:center;gap:7px;justify-content:flex-start}.kr-ic{display:inline-flex}.kr-ic svg{display:block}
+.kx-btn.kr-btn.primary{background:var(--ac);color:#10200f;border-color:var(--ac)}.kx-btn.kr-btn.off{opacity:.5;cursor:not-allowed}
+.kr-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.04)}
+.kr-row-t{flex:1 1 150px;min-width:0;display:grid;gap:2px}.kr-row-t b{font-size:12.5px;color:#fff}.kr-row-t span{font-size:11px;color:#9fc0ae}.kr-row-c{display:flex;gap:6px;margin-left:auto}
+.kt-bar-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.kt-bar-top .kx-muted{flex:1;min-width:0}
+.kt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:12px;align-items:start}.kt-grid>.kx-empty{grid-column:1/-1}
+.kt-card{position:relative;overflow:hidden;display:grid;gap:10px;padding:13px 13px 12px 18px;border-radius:18px;border:1px solid rgba(255,255,255,.1);background:radial-gradient(120% 70% at 0% 0%,rgba(255,255,255,.07),transparent 60%),rgba(0,0,0,.24);transition:transform .14s ease,border-color .14s ease}
+.kt-card:hover{transform:translateY(-2px);border-color:rgba(255,255,255,.22)}.kt-card[data-on="true"]{border-color:var(--ac);box-shadow:0 0 0 1px var(--ac) inset}
+.kt-strip{position:absolute;left:0;top:0;bottom:0;width:6px}
+.kt-head{display:flex;align-items:center;gap:9px;min-width:0}.kt-emoji{flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:12px;background:rgba(255,255,255,.08);font-size:19px}
+.kt-title{flex:1;min-width:0;display:grid;gap:1px}.kt-title b{font:700 14.5px Georgia,serif;color:#fff}.kt-title small{font-size:10.5px;color:#9fc0ae;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kt-afk{flex:none;padding:2px 8px;border-radius:99px;background:rgba(252,211,77,.16);border:1px solid rgba(252,211,77,.45);color:#fcd34d;font-size:10px;font-weight:800;letter-spacing:.04em}
+.kt-pets{display:grid;gap:6px}.kt-pet{display:flex;align-items:center;gap:9px;min-width:0;padding:5px 7px;border-radius:12px;background:rgba(255,255,255,.04)}
+.kt-face{border-radius:50%;background:rgba(0,0,0,.3)}.kt-pet-i{flex:1;min-width:0;display:grid;gap:3px}.kt-pet-i b{font-size:12px;color:#eef6f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kt-dots{display:flex;flex-wrap:wrap;gap:3px}.kt-dots i{width:9px;height:9px;border-radius:3px;box-shadow:0 0 0 1px rgba(0,0,0,.45) inset,0 0 0 1px rgba(255,255,255,.12)}
+.kt-str{position:relative;flex:none;min-width:58px;height:19px;border-radius:99px;background:rgba(0,0,0,.4);overflow:hidden;text-align:center}.kt-str span{position:absolute;inset:0 auto 0 0;background:rgba(251,146,60,.38)}.kt-str[data-max="true"] span{background:rgba(74,222,128,.4)}
+.kt-str b{position:relative;display:block;padding:0 7px;line-height:19px;font-size:10.5px;color:#fff;font-variant-numeric:tabular-nums}
+.kt-stat{display:grid;gap:5px;padding:10px 11px;border-radius:14px;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.07)}
+.kt-stat-h{display:flex;align-items:center;justify-content:space-between;gap:6px}.kt-stat-n{font:800 10px "Trebuchet MS",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#9fc0ae}
+.kt-nav{display:inline-flex;align-items:center;gap:4px;color:#9fc0ae;font-size:10.5px}.kt-nav em{font-style:normal;min-width:26px;text-align:center}.kt-nav button{width:18px;height:18px;border:0;border-radius:6px;background:rgba(255,255,255,.08);color:#dce9e0;cursor:pointer;line-height:1;padding:0}.kt-nav button:hover{background:rgba(255,255,255,.18)}
+.kt-stat-v{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px}.kt-big{font:700 21px Georgia,serif;font-variant-numeric:tabular-nums}.kt-unit{font-size:11px;color:#9fc0ae}.kt-max{margin-left:auto;font-size:10.5px;color:#9fc0ae}.kt-on{font:700 15px Georgia,serif;color:#86efac}
+.kt-bar{height:6px;border-radius:9px;background:rgba(0,0,0,.45);overflow:hidden}.kt-bar i{display:block;height:100%;border-radius:9px}
+.kt-proc{display:flex;justify-content:space-between;gap:8px;padding-top:5px;border-top:1px dashed rgba(255,255,255,.1);font-size:11px;color:#9fc0ae}.kt-proc b{color:#fde68a;font-variant-numeric:tabular-nums}
+.kt-feed{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 11px;border-radius:12px;background:rgba(255,255,255,.04);font-size:11px;color:#b9d0c1}.kt-feed b{font-size:12px}
+.kt-foot{display:flex;gap:7px}.kt-foot .kx-btn:first-child{flex:1}
 #${DOCK_ID} .gd-btn[data-win-on="true"]{border-color:rgba(253,224,71,.7);background:rgba(253,224,71,.16);color:#fde047}`;
 
   // ---------- dock ----------
