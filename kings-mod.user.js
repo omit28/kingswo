@@ -2,15 +2,17 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.0.5
-// @description  Compact Arie-style mod dock: icon grid with live on/off lights, customize panel (size, columns, labels, opacity, hide buttons), a movable + resizable Garden Almanac, and a weather timer you can switch on/off. Alt+O opens the Almanac.
+// @version      3.1.1
+// @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
 // @match        https://magicgarden.gg/r/*
 // @match        https://starweaver.org/r/*
 // @run-at       document-start
 // @inject-into  page
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      mg-api.ariedam.fr
 // @license      All rights reserved. Do not redistribute or rebrand without permission.
 // @updateURL    https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js
 // @downloadURL  https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js
@@ -19,14 +21,82 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.0.5", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.1.0", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
+  const ALERT_KEY = "mg-king-alerts-v1";
   const DOCK_ID = "mg-shortcut-sidebar", ALMANAC_ID = "mg-garden-almanac", WEATHER_ID = "mg-weather-timer", STYLE_ID = "mg-garden-dock-style", GC_STYLE_ID = "mg-hide-gc-timer";
   const MINI_KEY = "mg-shortcut-sidebar-minimized-v1", POSITION_KEY = "mg-shortcut-sidebar-position-v2", OLD_POSITION_KEY = "mg-shortcut-sidebar-position-v1";
   const SETTINGS_KEY = "mg-shortcut-sidebar-settings-v3", ALMANAC_RECT_KEY = "mg-almanac-rect-v1", WEATHER_POS_KEY = "mg-weather-pos-v1";
   const PET_STR = {"Worm":{"ms":2.0,"h":12.0},"Snail":{"ms":2.0,"h":12.0},"Bee":{"ms":2.5,"h":12.0},"Chicken":{"ms":2.0,"h":24.0},"Bunny":{"ms":2.0,"h":24.0},"Dragonfly":{"ms":2.5,"h":24.0},"Pig":{"ms":2.5,"h":72.0},"Cow":{"ms":2.5,"h":72.0},"Turkey":{"ms":2.5,"h":72.0},"Squirrel":{"ms":2.0,"h":100.0},"Turtle":{"ms":2.5,"h":100.0},"Goat":{"ms":2.0,"h":100.0},"SnowFox":{"ms":2.0,"h":100.0},"Stoat":{"ms":2.0,"h":100.0},"WhiteCaribou":{"ms":2.5,"h":100.0},"Pony":{"ms":2.0,"h":72.0},"Horse":{"ms":2.5,"h":100.0},"FireHorse":{"ms":2.5,"h":144.0},"Butterfly":{"ms":2.5,"h":144.0},"Capybara":{"ms":2.5,"h":144.0},"Peacock":{"ms":2.5,"h":144.0}};
   const BASE_SIZE = 50, MAX_SIZE = 100;
+
+  // ---------- page context + game connection (needed for pet teams and teleport) ----------
+  const PW = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
+  const randomId = () => { try { const u = globalThis.crypto?.randomUUID?.(); if (u) return u; } catch {} return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`; };
+  const QUINOA_SCOPE = ["Room", "Quinoa"];
+  const QUINOA_COMMANDS = new Set(["PlantSeed", "PlantGardenPlant", "WaterPlant", "HarvestCrop", "PotPlant", "Preserve", "DisplayCrop", "PickupDisplayedCrop", "RemoveGardenObject", "MutationPotion", "CropCleanser", "SellAllCrops", "PlaceDecor", "PickupDecor", "GrowEgg", "HatchEgg", "PlacePet", "PickupPet", "FeedPet", "SellPet", "NamePet", "SwapPet", "SwapPetFromStorage", "MovePetSlot", "RidePet", "DismountPet", "DawnCapture", "Thundercharge", "ReplenishPotion", "XPPotion", "EquipPetCosmetic", "SavePetTeam", "ApplyPetTeam", "DeletePetTeam", "MovePetTeam", "SetPetTeamEmblem", "MoveItem", "ToggleLockItem", "LogItems", "PurchaseShopItem", "Wish"]);
+  // The game numbers every command it sends. A command we add has to carry the next number, and the game's own
+  // commands after it have to be renumbered, so this part mirrors what the server expects (same as Arie's mod).
+  const WS = { sockets: [], main: null, nextSeq: 1, injected: 0, own: new Set(), off: false, welcomed: false };
+  const NativeWS = PW.WebSocket;
+  function wsReset() { WS.nextSeq = 1; WS.injected = 0; WS.own.clear(); WS.welcomed = false; }
+  function wsSeed(executed) { const n = Number(executed); if (!Number.isFinite(n) || n < 0) return; WS.nextSeq = n + 1; WS.injected = 0; WS.own.clear(); WS.welcomed = true; }
+  function wsBuild(payload) {
+    const { scopePath: rawScope, ...command } = payload; const scopePath = rawScope ?? QUINOA_SCOPE;
+    if (!QUINOA_COMMANDS.has(command.type)) return { scopePath, ...command };
+    const requestId = randomId(); if (WS.own.size >= 64) WS.own.delete(WS.own.values().next().value); WS.own.add(requestId);
+    WS.injected++; return { scopePath, type: "QuinoaCommand", requestId, commandSequence: WS.nextSeq++, command };
+  }
+  function wsOpen() { if (WS.main && WS.main.readyState === 1) return WS.main; return WS.sockets.find((s) => s.readyState === 1) || null; }
+  function sendGame(payload) { if (WS.off) return false; const ws = wsOpen(); if (!ws) return false; try { ws.send(JSON.stringify(wsBuild(payload))); return true; } catch { return false; } }
+  function installWsHook() {
+    try {
+      if (!NativeWS || !NativeWS.prototype) return;
+      if (NativeWS.prototype.__qwsSendPatched) { WS.off = true; return; }   // Arie's mod is already handling the socket; do not fight it
+      if (NativeWS.prototype.__kxPatched) return;
+      const proto = NativeWS.prototype, original = proto.send;
+      proto.send = function (data, ...rest) {
+        let frame = data;
+        try {
+          if (typeof data === "string" && data.indexOf('"QuinoaCommand"') !== -1) {
+            const parsed = JSON.parse(data);
+            if (parsed?.type === "QuinoaCommand" && parsed.command && typeof parsed.command === "object") {
+              if (typeof parsed.requestId === "string" && WS.own.delete(parsed.requestId)) { /* ours, already numbered */ }
+              else {
+                const theirs = Number(parsed.commandSequence);
+                if (WS.injected > 0) { if (Number.isFinite(theirs) && theirs > WS.nextSeq) WS.nextSeq = theirs; frame = JSON.stringify({ ...parsed, commandSequence: WS.nextSeq++ }); }
+                else if (Number.isFinite(theirs) && theirs >= WS.nextSeq) WS.nextSeq = theirs + 1;
+              }
+            }
+          }
+        } catch {}
+        return original.call(this, frame, ...rest);
+      };
+      proto.__kxPatched = true;
+      const Wrapped = function (url, protocols) {
+        const ws = protocols !== undefined ? new NativeWS(url, protocols) : new NativeWS(url);
+        WS.sockets.push(ws);
+        ws.addEventListener("open", () => { setTimeout(() => { if (ws.readyState === 1 && !WS.main) WS.main = ws; }, 800); });
+        ws.addEventListener("message", (ev) => {
+          const d = ev.data;
+          if (typeof d === "string") { if (d.indexOf('"Welcome"') === -1) return; try { const j = JSON.parse(d); if (j?.type === "Welcome") { wsSeed(j.executedCommandSequence); WS.main = ws; } } catch {} return; }
+          if (WS.welcomed) return;
+          const read = d instanceof Blob ? d.text() : d instanceof ArrayBuffer ? Promise.resolve(new TextDecoder().decode(d)) : null;
+          read?.then((txt) => { if (txt.indexOf('"Welcome"') === -1) return; try { const j = JSON.parse(txt); if (j?.type === "Welcome") { wsSeed(j.executedCommandSequence); WS.main = ws; } } catch {} }).catch(() => {});
+        });
+        ws.addEventListener("close", () => { wsReset(); if (WS.main === ws) WS.main = null; const i = WS.sockets.indexOf(ws); if (i >= 0) WS.sockets.splice(i, 1); });
+        return ws;
+      };
+      Wrapped.prototype = NativeWS.prototype;
+      for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) { try { Wrapped[k] = NativeWS[k]; } catch {} }
+      PW.WebSocket = Wrapped;
+      if (PW !== window) { try { window.WebSocket = Wrapped; } catch {} }
+    } catch (error) { console.warn("[King's Mod] websocket hook failed", error); }
+  }
+  installWsHook();
+
+  const KD = {"crops":{"Carrot":{"n":"Carrot","sn":"Carrot Seed","c":10,"r":"Common","p":20,"w":0.1,"m":3,"ss":"Carrot","cs":"Carrot"},"Cabbage":{"n":"Cabbage","sn":"Cabbage Seed","c":30,"r":"Common","p":42,"w":1,"m":3,"ss":"Cabbage","cs":"Cabbage"},"Strawberry":{"n":"Strawberry","sn":"Strawberry Seed","c":50,"r":"Common","p":14,"w":0.05,"m":2,"ss":"Strawberry","cs":"Strawberry"},"Aloe":{"n":"Aloe","sn":"Aloe Seed","c":135,"r":"Common","p":310,"w":1.5,"m":2.5,"ss":"Aloe","cs":"Aloe"},"Beet":{"n":"Beet","sn":"Beet Seed","c":210,"r":"Common","p":350,"w":0.3,"m":3,"ss":"Beet","cs":"Beet"},"Rose":{"n":"Rose","sn":"Rose Seed","c":229,"r":"Uncommon","p":300,"w":0.01,"m":4,"ss":"Rose","cs":"RoseRed"},"FavaBean":{"n":"Fava Bean Pod","sn":"Fava Bean","c":250,"r":"Uncommon","p":30,"w":0.03,"m":3,"ss":"FavaBean","cs":"FavaBean"},"Delphinium":{"n":"Delphinium","sn":"Delphinium Seed","c":300,"r":"Uncommon","p":530,"w":0.02,"m":3,"ss":"Delphinium","cs":"Delphinium"},"Blueberry":{"n":"Blueberry","sn":"Blueberry Seed","c":400,"r":"Uncommon","p":23,"w":0.01,"m":2,"ss":"Blueberry","cs":"Blueberry"},"Apple":{"n":"Apple","sn":"Apple Seed","c":500,"r":"Uncommon","p":73,"w":0.18,"m":2,"ss":"Apple","cs":"Apple"},"OrangeTulip":{"n":"Tulip","sn":"Tulip Seed","c":600,"r":"Uncommon","p":767,"w":0.01,"m":3,"ss":"Tulip","cs":"Tulip"},"Tomato":{"n":"Tomato","sn":"Tomato Seed","c":800,"r":"Uncommon","p":27,"w":0.3,"m":2,"ss":"Tomato","cs":"Tomato"},"Daffodil":{"n":"Daffodil","sn":"Daffodil Seed","c":1000,"r":"Rare","p":1090,"w":0.01,"m":3,"ss":"Daffodil","cs":"Daffodil"},"Corn":{"n":"Corn","sn":"Corn Kernel","c":1300,"r":"Rare","p":36,"w":1.2,"m":2,"ss":"Corn","cs":"Corn"},"Watermelon":{"n":"Watermelon","sn":"Watermelon Seed","c":2500,"r":"Rare","p":2708,"w":4.5,"m":3,"ss":"Watermelon","cs":"Watermelon"},"Pumpkin":{"n":"Pumpkin","sn":"Pumpkin Seed","c":3000,"r":"Rare","p":3700,"w":6,"m":3,"ss":"Pumpkin","cs":"Pumpkin"},"Echeveria":{"n":"Echeveria","sn":"Echeveria Cutting","c":4200,"r":"Rare","p":4600,"w":0.8,"m":2.75,"ss":"Echeveria","cs":"Echeveria"},"Pear":{"n":"Pear","sn":"Pear Seed","c":6000,"r":"Rare","p":250,"w":0.17,"m":2,"ss":"Pear","cs":"Pear"},"Gentian":{"n":"Gentian","sn":"Gentian Seed","c":9000,"r":"Rare","p":10000,"w":0.02,"m":3,"ss":"Gentian","cs":"Gentian"},"Coconut":{"n":"Coconut","sn":"Coconut Seed","c":10000,"r":"Legendary","p":302,"w":5,"m":3,"ss":"Coconut","cs":"Coconut"},"PineTree":{"n":"Pine Tree","sn":"Pinecone","c":12000,"r":"Legendary","p":15000,"w":1000,"m":3.5,"ss":"Pinecone","cs":"PineTree"},"Banana":{"n":"Banana","sn":"Banana Seed","c":15000,"r":"Legendary","p":1750,"w":0.12,"m":1.7,"ss":"Banana","cs":"Banana"},"Lily":{"n":"Lily","sn":"Lily Seed","c":20000,"r":"Legendary","p":20123,"w":0.02,"m":2.75,"ss":"Lily","cs":"Lily"},"Camellia":{"n":"Camellia","sn":"Camellia Seed","c":55000,"r":"Legendary","p":4875,"w":0.3,"m":2.5,"ss":"Camellia","cs":"Camellia"},"Squash":{"n":"Squash","sn":"Squash Seed","c":55000,"r":"Legendary","p":3500,"w":0.3,"m":2.5,"ss":"Squash","cs":"Squash"},"Peach":{"n":"Peach","sn":"Peach Seed","c":85000,"r":"Legendary","p":9000,"w":0.18,"m":3,"ss":"Peach","cs":"Peach"},"BurrosTail":{"n":"Burro's Tail","sn":"Burro's Tail Cutting","c":93000,"r":"Legendary","p":6000,"w":0.4,"m":2.5,"ss":"BurrosTail","cs":"BurrosTail"},"Mushroom":{"n":"Mushroom","sn":"Mushroom Spore","c":150000,"r":"Mythical","p":160000,"w":25,"m":3.5,"ss":"Mushroom","cs":"Mushroom"},"Cactus":{"n":"Cactus","sn":"Cactus Seed","c":250000,"r":"Mythical","p":261000,"w":1500,"m":1.8,"ss":"Cactus","cs":"Cactus"},"Bamboo":{"n":"Bamboo Shoot","sn":"Bamboo Seed","c":400000,"r":"Mythical","p":500000,"w":1,"m":2,"ss":"Bamboo","cs":"Bamboo"},"Poinsettia":{"n":"Poinsettia","sn":"Poinsettia Seed","c":500000,"r":"Mythical","p":30000,"w":0.02,"m":2,"ss":"Poinsettia","cs":"Poinsettia"},"VioletCort":{"n":"Violet Cort","sn":"Violet Cort Spore","c":520000,"r":"Mythical","p":600000,"w":2,"m":3.5,"ss":"VioletCort","cs":"VioletCort"},"Chrysanthemum":{"n":"Chrysanthemum","sn":"Chrysanthemum Seed","c":670000,"r":"Mythical","p":18000,"w":0.01,"m":2.75,"ss":"Chrysanthemum","cs":"Chrysanthemum"},"Date":{"n":"Date","sn":"Date Seed","c":750000,"r":"Mythical","p":15000,"w":0.02,"m":2,"ss":"Date","cs":"Date"},"Grape":{"n":"Grape","sn":"Grape Seed","c":850000,"r":"Mythical","p":12500,"w":3,"m":2,"ss":"Grape","cs":"Grape"},"Pepper":{"n":"Pepper","sn":"Pepper Seed","c":1000000,"r":"Divine","p":7220,"w":0.5,"m":2,"ss":"Pepper","cs":"Pepper"},"Lemon":{"n":"Lemon","sn":"Lemon Seed","c":2000000,"r":"Divine","p":10000,"w":0.5,"m":3,"ss":"Lemon","cs":"Lemon"},"PassionFruit":{"n":"Passion Fruit","sn":"Passion Fruit Seed","c":2750000,"r":"Divine","p":24500,"w":9.5,"m":2,"ss":"PassionFruit","cs":"PassionFruit"},"DragonFruit":{"n":"Dragon Fruit","sn":"Dragon Fruit Seed","c":5000000,"r":"Divine","p":24500,"w":8.4,"m":2,"ss":"DragonFruit","cs":"DragonFruit"},"Cacao":{"n":"Cacao Fruit","sn":"Cacao Bean","c":10000000,"r":"Divine","p":70000,"w":0.5,"m":2.5,"ss":"Cacao","cs":"Cacao"},"Lychee":{"n":"Lychee Fruit","sn":"Lychee Pit","c":25000000,"r":"Divine","p":50000,"w":9,"m":2,"ss":"Lychee","cs":"Lychee"},"Sunflower":{"n":"Sunflower","sn":"Sunflower Seed","c":100000000,"r":"Divine","p":750000,"w":10,"m":2.5,"ss":"Sunflower","cs":"Sunflower"},"Starweaver":{"n":"Starweaver Fruit","sn":"Starweaver Pod","c":1000000000,"r":"Celestial","p":10000000,"w":10,"m":2,"ss":"Starweaver","cs":"Starweaver"},"DawnCelestial":{"n":"Dawnbinder Bulb","sn":"Dawnbinder Pod","c":10000000000,"r":"Celestial","p":11000000,"w":6,"m":2.5,"ss":"DawnCelestial","cs":"DawnCelestialCrop"},"MoonCelestial":{"n":"Moonbinder Bulb","sn":"Moonbinder Pod","c":50000000000,"r":"Celestial","p":11000000,"w":2,"m":2,"ss":"MoonCelestial","cs":"MoonCelestialCrop"}},"pets":{"Worm":{"n":"Worm","r":"Common","ms":2,"h":12,"hc":500,"sp":5000,"hd":30,"d":["Carrot","Strawberry","Aloe","Tomato","Apple"]},"Snail":{"n":"Snail","r":"Common","ms":2,"h":12,"hc":1000,"sp":10000,"hd":60,"d":["Blueberry","Tomato","Corn","Daffodil","Chrysanthemum"]},"Bee":{"n":"Bee","r":"Common","ms":2.5,"h":12,"hc":1500,"sp":30000,"hd":15,"d":["Strawberry","Blueberry","Daffodil","Lily","Chrysanthemum"]},"Chicken":{"n":"Chicken","r":"Uncommon","ms":2,"h":24,"hc":3000,"sp":50000,"hd":60,"d":["Aloe","Corn","Watermelon","Pumpkin"]},"Bunny":{"n":"Bunny","r":"Uncommon","ms":2,"h":24,"hc":750,"sp":75000,"hd":45,"d":["Carrot","Strawberry","Blueberry","OrangeTulip","Apple"]},"Dragonfly":{"n":"Dragonfly","r":"Uncommon","ms":2.5,"h":24,"hc":250,"sp":150000,"hd":15,"d":["Apple","OrangeTulip","Echeveria"]},"Pig":{"n":"Pig","r":"Rare","ms":2.5,"h":72,"hc":50000,"sp":500000,"hd":60,"d":["Watermelon","Pumpkin","Mushroom","Bamboo"]},"Cow":{"n":"Cow","r":"Rare","ms":2.5,"h":72,"hc":25000,"sp":1000000,"hd":75,"d":["Coconut","Banana","BurrosTail","Mushroom"]},"Turkey":{"n":"Turkey","r":"Rare","ms":2.5,"h":72,"hc":500,"sp":3000000,"hd":60,"d":["FavaBean","Corn","Squash"]},"Squirrel":{"n":"Squirrel","r":"Legendary","ms":2,"h":100,"hc":15000,"sp":5000000,"hd":30,"d":["Pumpkin","Banana","Grape"]},"Turtle":{"n":"Turtle","r":"Legendary","ms":2.5,"h":100,"hc":100000,"sp":10000000,"hd":90,"d":["Watermelon","BurrosTail","Bamboo","Pepper"]},"Goat":{"n":"Goat","r":"Legendary","ms":2,"h":100,"hc":20000,"sp":20000000,"hd":60,"d":["Pumpkin","Coconut","Pepper","Camellia","PassionFruit"]},"SnowFox":{"n":"Snow Fox","r":"Legendary","ms":2,"h":100,"hc":14000,"sp":7000000,"hd":45,"d":["Echeveria","Squash","Grape"]},"Stoat":{"n":"Stoat","r":"Legendary","ms":2,"h":100,"hc":10000,"sp":10000000,"hd":60,"d":["Banana","Pepper","Cactus"]},"WhiteCaribou":{"n":"Caribou","r":"Legendary","ms":2.5,"h":100,"hc":30000,"sp":15000000,"hd":75,"d":["Camellia","BurrosTail","Mushroom"]},"Pony":{"n":"Pony","r":"Legendary","ms":2,"h":72,"hc":4000,"sp":10000000,"hd":60,"d":["Beet","Pear","Coconut"]},"Horse":{"n":"Horse","r":"Legendary","ms":2.5,"h":100,"hc":25000,"sp":50000000,"hd":75,"d":["Squash","Echeveria","Gentian"]},"FireHorse":{"n":"Fire Horse","r":"Mythical","ms":2.5,"h":144,"hc":200000,"sp":150000000,"hd":90,"d":["DragonFruit","Poinsettia","Cacao"]},"Butterfly":{"n":"Butterfly","r":"Mythical","ms":2.5,"h":144,"hc":25000,"sp":50000000,"hd":30,"d":["Daffodil","Lily","Grape","Lemon","Sunflower"]},"Capybara":{"n":"Capybara","r":"Mythical","ms":2.5,"h":144,"hc":150000,"sp":200000000,"hd":60,"d":["Lemon","PassionFruit","DragonFruit","Lychee"]},"Peacock":{"n":"Peacock","r":"Mythical","ms":2.5,"h":144,"hc":100000,"sp":100000000,"hd":60,"d":["Cactus","Sunflower","Lychee"]}},"eggs":{"CommonEgg":{"n":"Common Egg","r":"Common","c":100000,"s":"CommonEgg","t":600},"UncommonEgg":{"n":"Uncommon Egg","r":"Uncommon","c":1000000,"s":"UncommonEgg","t":3600},"RareEgg":{"n":"Rare Egg","r":"Rare","c":10000000,"s":"RareEgg","t":21600},"LegendaryEgg":{"n":"Legendary Egg","r":"Legendary","c":100000000,"s":"LegendaryEgg","t":43200},"MythicalEgg":{"n":"Mythical Egg","r":"Mythical","c":1000000000,"s":"MythicalEgg","t":86400},"WinterEgg":{"n":"Winter Egg","r":"Legendary","c":800000000,"s":"WinterEgg","t":43200},"SnowEgg":{"n":"Snow Egg","r":"Legendary","c":200000000,"s":"SnowEgg","t":43200},"HorseEgg":{"n":"Horse Egg","r":"Legendary","c":200000000,"s":"HorseEgg","t":43200}},"tools":{"WateringCan":{"n":"Watering Can","r":"Common","c":5000,"s":"WateringCan"},"PlanterPot":{"n":"Planter Pot","r":"Common","c":25000,"s":"PlanterPot"},"Shovel":{"n":"Garden Shovel","r":"Uncommon","c":1000000,"s":"Shovel"},"RainbowPotion":{"n":"Rainbow Potion","r":"Celestial","c":null,"s":"RainbowPotion"},"CropCleanser":{"n":"Crop Cleanser","r":"Common","c":80000,"s":"CropCleanser"}},"decor":{"SmallRock":{"n":"Small Garden Rock","r":"Common","c":1000,"s":"SmallRock"},"MediumRock":{"n":"Medium Garden Rock","r":"Common","c":2500,"s":"MediumRock"},"LargeRock":{"n":"Large Garden Rock","r":"Common","c":5000,"s":"LargeRock"},"WoodCaribou":{"n":"Wood Caribou","r":"Common","c":9000,"s":"WoodCaribou"},"WoodBench":{"n":"Wood Bench","r":"Common","c":10000,"s":"WoodBench"},"WoodArch":{"n":"Wood Arch","r":"Common","c":20000,"s":"WoodArch"},"WoodBridge":{"n":"Wood Bridge","r":"Common","c":40000,"s":"WoodBridge"},"WoodLampPost":{"n":"Wood Lamp Post","r":"Common","c":80000,"s":"WoodLampPost"},"WoodOwl":{"n":"Wood Owl","r":"Common","c":90000,"s":"WoodOwl"},"WoodBirdhouse":{"n":"Wood Birdhouse","r":"Common","c":100000,"s":"Birdhouse"},"WoodWindmill":{"n":"Wood Windmill","r":"Common","c":500000,"s":"WoodWindmill"},"WoodPergola":{"n":"Wood Pergola","r":"Common","c":30000,"s":"WoodPergola"},"StoneCaribou":{"n":"Stone Caribou","r":"Uncommon","c":750000,"s":"StoneCaribou"},"StoneBench":{"n":"Stone Bench","r":"Uncommon","c":1000000,"s":"StoneBench"},"StoneArch":{"n":"Stone Arch","r":"Uncommon","c":4000000,"s":"StoneArch"},"StoneBridge":{"n":"Stone Bridge","r":"Uncommon","c":5000000,"s":"StoneBridge"},"StoneLampPost":{"n":"Stone Lamp Post","r":"Uncommon","c":8000000,"s":"StoneLampPost"},"StoneGnome":{"n":"Stone Gnome","r":"Uncommon","c":9000000,"s":"StoneGnome"},"StoneBirdbath":{"n":"Stone Birdbath","r":"Uncommon","c":10000000,"s":"StoneBirdBath"},"MarbleCaribou":{"n":"Marble Caribou","r":"Rare","c":50000000,"s":"MarbleCaribou"},"MarbleBench":{"n":"Marble Bench","r":"Rare","c":75000000,"s":"MarbleBench"},"MarbleArch":{"n":"Marble Arch","r":"Rare","c":100000000,"s":"MarbleArch"},"MarbleBridge":{"n":"Marble Bridge","r":"Rare","c":150000000,"s":"MarbleBridge"},"MarbleLampPost":{"n":"Marble Lamp Post","r":"Rare","c":200000000,"s":"MarbleLampPost"},"MarbleBlobling":{"n":"Marble Blobling","r":"Rare","c":300000000,"s":"MarbleBlobling"},"MarbleFountain":{"n":"Marble Fountain","r":"Rare","c":450000000,"s":"MarbleFountain"},"MiniFairyCottage":{"n":"Mini Fairy Cottage","r":"Rare","c":500000000,"s":"MiniFairyCottage"},"Cauldron":{"n":"Cauldron","r":"Legendary","c":666000000,"s":"Cauldron"},"StrawScarecrow":{"n":"Straw Scarecrow","r":"Legendary","c":1000000000,"s":"StrawScarecrow"},"MiniFairyForge":{"n":"Mini Fairy Forge","r":"Legendary","c":5000000000,"s":"MiniFairyForge"},"MiniFairyKeep":{"n":"Mini Fairy Keep","r":"Mythical","c":25000000000,"s":"MiniFairyKeep"},"PetHutch":{"n":"Pet Hutch","r":"Divine","c":80000000000,"s":"PetHutch"},"FeedingTrough":{"n":"Feeding Trough","r":"Rare","c":10000000,"s":"FeedingTrough"},"DecorShed":{"n":"Decor Shed","r":"Divine","c":60000000000,"s":"DecorShed"},"SeedSilo":{"n":"Seed Silo","r":"Divine","c":100000000000,"s":"SeedSilo"},"MiniWizardTower":{"n":"Mini Wizard Tower","r":"Mythical","c":75000000000,"s":"MiniWizardTower"},"HayBale":{"n":"Hay Bale","r":"Common","c":7000,"s":"HayBale"},"StringLights":{"n":"String Lights","r":"Common","c":7000,"s":"StringLights"},"ColoredStringLights":{"n":"Colored String Lights","r":"Common","c":8000,"s":"ColoredStringLights"},"PaperLantern":{"n":"Paper Lantern","r":"Common","c":9000,"s":"PaperLantern"},"FanousLantern":{"n":"Fanous Lantern","r":"Common","c":9000,"s":"FanousLantern"},"SmallGravestone":{"n":"Small Gravestone","r":"Common","c":8000,"s":"SmallGravestone"},"MediumGravestone":{"n":"Medium Gravestone","r":"Uncommon","c":500000,"s":"MediumGravestone"},"LargeGravestone":{"n":"Large Gravestone","r":"Rare","c":50000000,"s":"LargeGravestone"}},"mut":{"Gold":{"n":"Gold","x":25,"s":"Gold"},"Rainbow":{"n":"Rainbow","x":50,"s":"Rainbow"},"Wet":{"n":"Wet","x":2,"s":"Wet"},"Chilled":{"n":"Chilled","x":2,"s":"Chilled"},"Frozen":{"n":"Frozen","x":6,"s":"Frozen"},"Thunderstruck":{"n":"Thunderstruck","x":5,"s":"Thunderstruck"},"Thundercharged":{"n":"Thundercharged","x":7,"s":"Thundercharged"},"Dawnlit":{"n":"Dawnlit","x":4,"s":"Dawnlit"},"Amberlit":{"n":"Amberlit","x":6,"s":"Amberlit"},"Dawncharged":{"n":"Dawnbound","x":7,"s":"Dawncharged"},"Ambercharged":{"n":"Amberbound","x":10,"s":"Ambercharged"}},"abil":{"ProduceScaleBoost":{"n":"Crop Size Boost I","d":"Increases the size of garden crops"},"ProduceScaleBoostII":{"n":"Crop Size Boost II","d":"Increases the size of garden crops"},"ProduceScaleBoostIII":{"n":"Crop Size Boost III","d":""},"SnowyCropSizeBoost":{"n":"Snow Crop Size Boost","d":""},"DoubleHarvest":{"n":"Double Harvest","d":"Chance to duplicate harvested crops"},"DoubleHatch":{"n":"Double Hatch","d":"Chance to hatch an extra pet from eggs"},"ProduceEater":{"n":"Crop Eater","d":"Harvests non-mutated crops and sells them"},"SellBoostI":{"n":"Sell Boost I","d":"Receive bonus coins when selling crops"},"SellBoostII":{"n":"Sell Boost II","d":"Receive bonus coins when selling crops"},"SellBoostIII":{"n":"Sell Boost III","d":"Receive bonus coins when selling crops"},"SellBoostIV":{"n":"Sell Boost IV","d":"Receive bonus coins when selling crops"},"ProduceRefund":{"n":"Crop Refund","d":"Chance to get crops back when selling"},"PlantGrowthBoost":{"n":"Plant Growth Boost I","d":"Reduces the time for plants to grow"},"PlantGrowthBoostII":{"n":"Plant Growth Boost II","d":"Reduces the time for plants to grow"},"PlantGrowthBoostIII":{"n":"Plant Growth Boost III","d":""},"SnowyPlantGrowthBoost":{"n":"Snow Plant Growth Boost","d":""},"DawnPlantGrowthBoost":{"n":"Dawn Plant Growth Boost","d":""},"AmberPlantGrowthBoost":{"n":"Amber Plant Growth Boost","d":""},"ProduceMutationBoost":{"n":"Weather Mutation Boost I","d":""},"ProduceMutationBoostII":{"n":"Weather Mutation Boost II","d":""},"ProduceMutationBoostIII":{"n":"Weather Mutation Boost III","d":""},"SnowyCropMutationBoost":{"n":"Snow Boost","d":""},"DawnBoost":{"n":"Dawn Boost","d":""},"AmberMoonBoost":{"n":"Amber Moon Boost","d":""},"PetMutationBoost":{"n":"Pet Mutation Boost I","d":"Increases the chance of hatched pets gaining mutations"},"PetMutationBoostII":{"n":"Pet Mutation Boost II","d":"Increases the chance of hatched pets gaining mutations"},"PetMutationBoostIII":{"n":"Pet Mutation Boost III","d":""},"GoldGranter":{"n":"Gold Granter","d":"Grants the Gold mutation to a garden crop"},"RainbowGranter":{"n":"Rainbow Granter","d":"Grants the Rainbow mutation to a garden crop"},"RainDance":{"n":"Rain Dance","d":"Grants the Wet mutation to a garden crop"},"EggGrowthBoost":{"n":"Egg Growth Boost I","d":"Reduces the time for eggs to hatch"},"EggGrowthBoostII_NEW":{"n":"Egg Growth Boost II","d":"Reduces the time for eggs to hatch"},"EggGrowthBoostII":{"n":"Egg Growth Boost III","d":"Reduces the time for eggs to hatch"},"SnowyEggGrowthBoost":{"n":"Snowy Egg Growth Boost","d":""},"PetAgeBoost":{"n":"Hatch XP Boost I","d":"Hatched pets start with bonus XP"},"PetAgeBoostII":{"n":"Hatch XP Boost II","d":"Hatched pets start with bonus XP"},"PetAgeBoostIII":{"n":"Hatch XP Boost III","d":""},"PetHatchSizeBoost":{"n":"Max Strength Boost I","d":"Increases the maximum strength of hatched pets"},"PetHatchSizeBoostII":{"n":"Max Strength Boost II","d":"Increases the maximum strength of hatched pets"},"PetHatchSizeBoostIII":{"n":"Max Strength Boost III","d":""},"PetXpBoost":{"n":"XP Boost I","d":"Gives bonus XP to active pets"},"PetXpBoostII":{"n":"XP Boost II","d":"Gives bonus XP to active pets"},"PetXpBoostIII":{"n":"XP Boost III","d":""},"SnowyPetXpBoost":{"n":"Snow XP Boost","d":""},"HungerRestore":{"n":"Hunger Restore I","d":"Restores the hunger of a random active pet"},"HungerRestoreII":{"n":"Hunger Restore II","d":"Restores the hunger of a random active pet"},"HungerRestoreIII":{"n":"Hunger Restore III","d":""},"SnowyHungerRestore":{"n":"Snowy Hunger Restore","d":""},"HungerBoost":{"n":"Hunger Boost I","d":"Reduces the hunger depletion rate of active pets"},"HungerBoostII":{"n":"Hunger Boost II","d":"Reduces the hunger depletion rate of active pets"},"HungerBoostIII":{"n":"Hunger Boost III","d":""},"SnowyHungerBoost":{"n":"Snowy Hunger Boost","d":""},"PetRefund":{"n":"Pet Refund I","d":"Chance to receive the pet back as an egg when sold"},"PetRefundII":{"n":"Pet Refund II","d":"Chance to receive the pet back as an egg when sold"},"Copycat":{"n":"Copycat","d":"Chance to copy the ability of another active pet"},"CoinFinderI":{"n":"Coin Finder I","d":"Finds coins in your garden"},"CoinFinderII":{"n":"Coin Finder II","d":"Finds coins in your garden"},"CoinFinderIII":{"n":"Coin Finder III","d":"Finds coins in your garden"},"SnowyCoinFinder":{"n":"Snowy Coin Finder","d":""},"SeedFinderI":{"n":"Seed Finder I","d":"Finds common and uncommon seeds in your garden"},"SeedFinderII":{"n":"Seed Finder II","d":"Finds rare and legendary seeds in your garden"},"SeedFinderIII":{"n":"Seed Finder III","d":"Finds mythical seeds in your garden"},"SeedFinderIV":{"n":"Seed Finder IV","d":"Finds divine and celestial seeds in your garden"},"MoonKisser":{"n":"Moon Kisser","d":"Empowers amber moon crops with special mutations"},"DawnKisser":{"n":"Dawn Kisser","d":"Empowers dawn crops with special mutations"},"SnowGranter":{"n":"Snow Granter","d":"Number of times Snow Granter triggered"},"FrostGranter":{"n":"Frost Granter","d":"Number of times Frost Granter triggered"},"DawnlitGranter":{"n":"Dawnlit Granter","d":""},"AmberlitGranter":{"n":"Amberlit Granter","d":""}}};
   // Crop mutations a granter pet can hand out: ability id -> mutation and base chance (% per minute at 100 strength).
   const GRANTERS = { RainbowGranter: ["Rainbow", 0.72], GoldGranter: ["Gold", 0.72], FrostGranter: ["Frozen", 6], ThunderstruckGranter: ["Thunderstruck", 5], RainDance: ["Wet", 10], SnowGranter: ["Chilled", 8], DawnlitGranter: ["Dawnlit", 4], AmberlitGranter: ["Ambershine", 2] };
   const MUTATION_ORDER = ["Rainbow", "Gold", "Frozen", "Thunderstruck", "Wet", "Chilled", "Dawnlit", "Ambershine"];
@@ -47,7 +117,11 @@
     { id: "trough", code: "KeyY", icon: "bowl", label: "Trough", title: "Auto Feeding Trough — Alt + Y", lamp: "mg-auto-feeding-trough-settings-v1" },
     { id: "feed", code: "KeyF", icon: "apple", label: "Feed", title: "Auto Feed Pets — Alt + F", lamp: "mg-auto-feed-pets-settings-v1" },
     { id: "abilities", code: "KeyA", icon: "sparkles", label: "Abilities", title: "Ability Tracker — Alt + A" },
-    { id: "pets", code: "KeyJ", icon: "paw", label: "Pets", title: "Weather Pet Swapper — Alt + J" },
+    { id: "petdeck", win: "pets", icon: "deck", label: "Pet Deck", title: "Pet Deck — Alt + D" },
+    { id: "pets", code: "KeyJ", icon: "paw", label: "Swapper", title: "Weather Pet Swapper — Alt + J" },
+    { id: "calc", win: "calc", icon: "calc", label: "Calculator", title: "Crop Calculator — Alt + C" },
+    { id: "room", win: "room", icon: "room", label: "Room", title: "Room — Alt + R" },
+    { id: "alerts", win: "alerts", icon: "bell", label: "Alerts", title: "Alerts — Alt + N\nRight-click: turn on / off", lamp: ALERT_KEY },
     { id: "buy", code: "KeyB", icon: "cart", label: "Buy", title: "Auto Buy — Alt + B" },
     { id: "sell", code: "KeyG", icon: "coin", label: "Sell", title: "Auto Sell — Alt + G" }
   ];
@@ -81,9 +155,9 @@
 
   // ---------- game data ----------
   let store = null;
-  function findStoreViaFiber() { const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__; if (!hook?.renderers?.size || typeof hook.getFiberRoots !== "function") return null; for (const [id] of hook.renderers) { const roots = hook.getFiberRoots(id); if (!roots) continue; for (const root of roots) { const seen = new Set(), stack = [root.current]; while (stack.length) { const fiber = stack.pop(); if (!fiber || seen.has(fiber)) continue; seen.add(fiber); const candidate = fiber.pendingProps?.value; if (candidate && typeof candidate.get === "function" && typeof candidate.sub === "function") return candidate; if (fiber.child) stack.push(fiber.child); if (fiber.sibling) stack.push(fiber.sibling); if (fiber.alternate) stack.push(fiber.alternate); } } } return null; }
-  async function getStore() { if (store) return store; const shared = window.__MG_STORE_BRIDGE__; if (shared?.promise?.then) { try { const resolved = await shared.promise; if (resolved && !resolved.__polyfill) return store = resolved; } catch {} } for (let i = 0; i < 20; i++) { const found = findStoreViaFiber(); if (found) return store = found; await sleep(500); } return null; }
-  function findAtom(label) { const cache = window.jotaiAtomCache?.cache; if (!cache?.values) return null; for (const atom of cache.values()) if (atom?.debugLabel === label || atom?.label === label) return atom; return null; }
+  function findStoreViaFiber() { const hook = PW.__REACT_DEVTOOLS_GLOBAL_HOOK__; if (!hook?.renderers?.size || typeof hook.getFiberRoots !== "function") return null; for (const [id] of hook.renderers) { const roots = hook.getFiberRoots(id); if (!roots) continue; for (const root of roots) { const seen = new Set(), stack = [root.current]; while (stack.length) { const fiber = stack.pop(); if (!fiber || seen.has(fiber)) continue; seen.add(fiber); const candidate = fiber.pendingProps?.value; if (candidate && typeof candidate.get === "function" && typeof candidate.sub === "function") return candidate; if (fiber.child) stack.push(fiber.child); if (fiber.sibling) stack.push(fiber.sibling); if (fiber.alternate) stack.push(fiber.alternate); } } } return null; }
+  async function getStore() { if (store) return store; const shared = PW.__MG_STORE_BRIDGE__; if (shared?.promise?.then) { try { const resolved = await shared.promise; if (resolved && !resolved.__polyfill) return store = resolved; } catch {} } for (let i = 0; i < 20; i++) { const found = findStoreViaFiber(); if (found) return store = found; await sleep(500); } return null; }
+  function findAtom(label) { const cache = PW.jotaiAtomCache?.cache; if (!cache?.values) return null; for (const atom of cache.values()) if (atom?.debugLabel === label || atom?.label === label) return atom; return null; }
   async function readAtom(activeStore, atom) { if (!atom) return null; try { let v = activeStore.get(atom); if (v && typeof v.then === "function") v = await Promise.race([v, new Promise((r) => setTimeout(() => r(null), 2000))]); return v; } catch { return null; } }
   function strengthOf(slot, species) {
     const info = PET_STR[species]; if (!info) return 87;
@@ -325,7 +399,7 @@
 #${WEATHER_ID} .gw-row{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid rgba(255,255,255,.07)}
 #${WEATHER_ID} .gw-row span{color:#9db0a5;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #${WEATHER_ID} .gw-row b{font:700 16px ui-monospace,Consolas,monospace;color:#fef3c7;font-variant-numeric:tabular-nums}`;
-  function injectStyles() { if (document.getElementById(STYLE_ID)) return; const style = document.createElement("style"); style.id = STYLE_ID; style.textContent = CSS; (document.head || document.documentElement).append(style); }
+  function injectStyles() { if (document.getElementById(STYLE_ID)) return; const style = document.createElement("style"); style.id = STYLE_ID; style.textContent = CSS + CSS2; (document.head || document.documentElement).append(style); }
   function setHideGC(on) {
     const existing = document.getElementById(GC_STYLE_ID);
     if (on && !existing) { const s = document.createElement("style"); s.id = GC_STYLE_ID; s.textContent = "#gc-lunar,#gc-lunar-mini{display:none!important}"; (document.head || document.documentElement).append(s); }
@@ -389,16 +463,16 @@
   const LUNAR_IDS = new Set(["Dawn", "AmberMoon"]), W_SHOP = { Frost: "snow", Thunderstorm: "thunder", Dawn: "dawn" }, SLOT_MS = 5 * 60 * 1000;
   let roomGame = null, seenWeather, seenAt = 0, weatherEl = null, weatherTimer = null, roomHooked = false;
   function hookRoom() {
-    if (roomHooked) return true; const conn = window.MagicCircle_RoomConnection; if (typeof conn?.subscribeToPatches !== "function") return false;
+    if (roomHooked) return true; const conn = PW.MagicCircle_RoomConnection; if (typeof conn?.subscribeToPatches !== "function") return false;
     try { conn.subscribeToPatches((_patches, full) => { roomGame = full?.child?.data || null; }); roomHooked = true; } catch { return false; }
     return true;
   }
-  function gameNow() { try { const o = window.__gardenCompanionForecastTrace?.()?.serverClockOffsetMs; return Date.now() + (Number.isFinite(o) ? o : 0); } catch { return Date.now(); } }
+  function gameNow() { try { const o = PW.__gardenCompanionForecastTrace?.()?.serverClockOffsetMs; return Date.now() + (Number.isFinite(o) ? o : 0); } catch { return Date.now(); } }
   const wName = (id) => W_NAME[id] || pretty(id) || "Clear";
-  function wIcon(id) { const sprite = window.__gardenCompanionWeatherSprites?.[id]; return sprite ? `<img src="${esc(sprite)}" alt="">` : (W_EMOJI[id] || "☀️"); }
+  function wIcon(id) { const sprite = PW.__gardenCompanionWeatherSprites?.[id]; return sprite ? `<img src="${esc(sprite)}" alt="">` : (W_EMOJI[id] || "☀️"); }
   function fmtClock(ms) { const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return h ? `${h}:${pad2(m)}:${pad2(x)}` : `${m}:${pad2(x)}`; }
   function weatherInfo(now) {
-    const game = roomGame || window.__gardenCompanionState?.game || null, cur = typeof game?.weather === "string" ? game.weather : "";
+    const game = roomGame || PW.__gardenCompanionState?.game || null, cur = typeof game?.weather === "string" ? game.weather : "";
     if (game && cur !== seenWeather) { seenAt = seenWeather === undefined ? 0 : now; seenWeather = cur; }
     const list = Array.isArray(game?.weatherForecast) ? game.weatherForecast : []; let endsIn = null, next = null;
     for (const e of list) {
@@ -440,6 +514,739 @@
     else { if (weatherEl) weatherEl.style.display = "none"; if (weatherTimer) { clearInterval(weatherTimer); weatherTimer = null; } }
   }
 
+
+  // =====================================================================================================
+  //  King's Mod 3.1 additions: Calculator, Pet Deck, Room, Alerts (+ real sprites from the game's asset API)
+  // =====================================================================================================
+  const h = (tag, cls, html) => { const el = document.createElement(tag); if (cls) el.className = cls; if (html != null) el.innerHTML = html; return el; };
+  const fmtCoins = (n) => (Number.isFinite(n) ? Math.round(n).toLocaleString("en-US") : "—");
+  function fmtShort(n) {
+    if (!Number.isFinite(n)) return "—"; const a = Math.abs(n);
+    for (const [v, s] of [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]]) if (a >= v) { const x = n / v; return `${x >= 100 ? Math.round(x) : Math.round(x * 10) / 10}${s}`; }
+    return String(Math.round(n));
+  }
+  const RARITY_COLOUR = { Common: "#c9d4cc", Uncommon: "#7ee08f", Rare: "#6fb7ff", Legendary: "#ffd166", Mythical: "#d995ff", Divine: "#ff9d6b", Celestial: "#7df3ff" };
+  const rarityColour = (r) => RARITY_COLOUR[r] || "#c9d4cc";
+  const cssId = (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  // ---------- real sprites (same asset API Arie's mod uses) ----------
+  const SPRITE_API = "https://mg-api.ariedam.fr/assets/sprites";
+  const hasGM = typeof GM_xmlhttpRequest === "function";
+  const spriteCache = new Map();
+  function gmBlob(url) {
+    return new Promise((resolve) => {
+      try { GM_xmlhttpRequest({ method: "GET", url, responseType: "blob", timeout: 15000, onload: (r) => resolve(r.status >= 200 && r.status < 300 && r.response ? URL.createObjectURL(r.response) : null), onerror: () => resolve(null), ontimeout: () => resolve(null) }); } catch { resolve(null); }
+    });
+  }
+  function probeImage(url) { return new Promise((resolve) => { const im = new Image(); im.onload = () => resolve(url); im.onerror = () => resolve(null); im.src = url; }); }
+  function spriteSrc(url) {
+    let p = spriteCache.get(url);
+    if (!p) { p = (hasGM ? gmBlob(url).then((b) => b || probeImage(url)) : probeImage(url)); spriteCache.set(url, p); p.then((v) => { if (!v) setTimeout(() => spriteCache.delete(url), 45000); }); }
+    return p;
+  }
+  const spriteUrl = (cat, name) => `${SPRITE_API}/${cat}/${encodeURIComponent(name)}.png`;
+  const composedUrl = (prefix, name, muts) => `${SPRITE_API}/composed?key=${encodeURIComponent(`${prefix}/${name}`)}${muts?.length ? `&mutations=${encodeURIComponent(muts.join(","))}` : ""}`;
+  // Candidate lists: the first one that loads wins, the emoji shows until then (and stays if nothing loads).
+  const SPR = {
+    seed: (sp) => [spriteUrl("seeds", KD.crops[sp]?.ss || sp), spriteUrl("seeds", sp)],
+    crop: (sp, muts) => { const n = KD.crops[sp]?.cs || sp; const m = (muts || []).filter(Boolean); return [...(m.length ? [composedUrl("sprite/plant", n, m)] : []), spriteUrl("plants", n), spriteUrl("tallPlants", n), spriteUrl("plants", sp)]; },
+    pet: (sp, muts) => { const m = (muts || []).filter(Boolean); return [...(m.length ? [composedUrl("sprite/pet", sp, m)] : []), spriteUrl("pets", sp)]; },
+    egg: (id) => [spriteUrl("pets", KD.eggs[id]?.s || id), spriteUrl("pets", id)],
+    tool: (id) => [spriteUrl("items", KD.tools[id]?.s || id), spriteUrl("items", id)],
+    decor: (id) => [spriteUrl("decor", KD.decor[id]?.s || id), spriteUrl("decor", id)],
+    mut: (id) => [spriteUrl("mutations", KD.mut[id]?.s || id), spriteUrl("mutations", id), spriteUrl("ui", `Mutation${id}`)]
+  };
+  const EMOJI = { seed: "🌱", crop: "🥬", pet: "🐾", egg: "🥚", tool: "🧰", decor: "🪴", mut: "✨" };
+  function spr(urls, size, emoji, cls) {
+    const wrap = h("span", `kx-spr${cls ? ` ${cls}` : ""}`); wrap.style.setProperty("--z", `${size}px`); wrap.textContent = emoji || "";
+    (async () => { for (const u of urls) { const src = await spriteSrc(u); if (!src) continue; const im = new Image(); im.alt = ""; im.draggable = false; im.decoding = "async"; im.onload = () => { wrap.textContent = ""; wrap.append(im); }; im.src = src; return; } })();
+    return wrap;
+  }
+  const sprHtml = (urls, size, emoji, cls) => { const holder = h("span"); holder.append(spr(urls, size, emoji, cls)); return holder.innerHTML; };   // static fallback only; prefer spr() for live images
+
+
+  // ---------- live game data (same /data feed as Arie's mod) so new crops, pets and abilities show up on their own ----------
+  const spriteNameOf = (v) => { const t = String(v || "").split(/[?#]/)[0].split("/").pop() || ""; return t.replace(/\.[a-z0-9]+$/i, "") || null; };
+  function gmText(url) {
+    return new Promise((resolve) => {
+      if (hasGM) { try { GM_xmlhttpRequest({ method: "GET", url, timeout: 25000, onload: (r) => resolve(r.status >= 200 && r.status < 300 ? r.responseText : null), onerror: () => resolve(null), ontimeout: () => resolve(null) }); return; } catch {} }
+      fetch(url).then((r) => (r.ok ? r.text() : null)).then(resolve).catch(() => resolve(null));
+    });
+  }
+  let liveLoaded = false;
+  async function loadLiveData() {
+    if (liveLoaded) return;
+    let d = null; try { d = JSON.parse(await gmText("https://mg-api.ariedam.fr/data")); } catch {}
+    if (!d || typeof d !== "object") { setTimeout(loadLiveData, 30000); return; }
+    liveLoaded = true; const R = (x) => (x === "Mythic" ? "Mythical" : x);
+    try {
+      if (d.plants) { const crops = {}; for (const [k, e] of Object.entries(d.plants)) { const sd = e?.seed || {}, c = e?.crop || {}; if (!(c.baseSellPrice > 0)) continue; crops[k] = { n: c.name || k, sn: sd.name || k, c: sd.coinPrice || 0, r: R(sd.rarity) || "Common", p: c.baseSellPrice, w: c.baseWeight || 0, m: c.maxSizeMultiplier || c.maxScale || 1, ss: spriteNameOf(sd.sprite || sd.tileRef) || KD.crops[k]?.ss || k, cs: spriteNameOf(c.sprite || c.tileRef) || KD.crops[k]?.cs || k }; } if (Object.keys(crops).length) KD.crops = { ...crops, ...Object.fromEntries(Object.entries(KD.crops).filter(([k]) => !(k in crops))) }; }
+      if (d.pets) { const pets = {}; for (const [k, v] of Object.entries(d.pets)) pets[k] = { n: v.name || k, r: R(v.rarity), ms: v.maxScale || 1, h: v.hoursToMature || 1, hc: v.coinsToFullyReplenishHunger || 3000, sp: v.maturitySellPrice || 0, hd: KD.pets[k]?.hd || 60, d: v.diet || [] }; KD.pets = { ...KD.pets, ...pets }; }
+      if (d.eggs) { const o = {}; for (const [k, v] of Object.entries(d.eggs)) o[k] = { n: v.name || k, r: R(v.rarity), c: v.coinPrice, s: spriteNameOf(v.sprite || v.tileRef) || KD.eggs[k]?.s || k, t: v.secondsToHatch }; KD.eggs = { ...KD.eggs, ...o }; }
+      if (d.items) { const o = {}; for (const [k, v] of Object.entries(d.items)) o[k] = { n: v.name || k, r: R(v.rarity), c: v.coinPrice, s: spriteNameOf(v.sprite || v.tileRef) || KD.tools[k]?.s || k }; KD.tools = { ...KD.tools, ...o }; }
+      if (d.decor) { const o = {}; for (const [k, v] of Object.entries(d.decor)) o[k] = { n: v.name || k, r: R(v.rarity), c: v.coinPrice, s: spriteNameOf(v.sprite || v.tileRef) || KD.decor[k]?.s || k }; KD.decor = { ...KD.decor, ...o }; }
+      if (d.mutations) { const o = {}; for (const [k, v] of Object.entries(d.mutations)) { o[k] = { n: v.name || k, x: v.coinMultiplier, s: spriteNameOf(v.sprite || v.tileRef) || KD.mut[k]?.s || k }; if (v.name && !(v.name in MUT_X) && v.coinMultiplier > 0) MUT_X[v.name] = v.coinMultiplier; } KD.mut = { ...KD.mut, ...o }; }
+      if (d.abilities) { const o = {}; for (const [k, v] of Object.entries(d.abilities)) o[k] = { n: v.name || k, d: v.description || "" }; KD.abil = { ...KD.abil, ...o }; }
+    } catch (error) { console.warn("[King's Mod] live data", error); }
+    for (const w of Object.values(WINS)) { try { if (w.isOpen()) w.render(); } catch {} }
+  }
+
+  // ---------- crop / pet maths (same rules the game uses) ----------
+  const CROP_MIN = 50, CROP_MAX = 100;
+  const MUT_X = { Gold: 25, Rainbow: 50, Wet: 2, Chilled: 2, Frozen: 6, Thunderstruck: 5, Thundercharged: 7, Dawnlit: 4, Dawnbound: 7, Amberlit: 6, Amberbound: 10 };
+  const MUT_ID = { Dawnbound: "Dawncharged", Amberlit: "Ambershine", Amberbound: "Ambercharged" };          // calculator label -> id the game stores
+  const MUT_NORM = { golden: "Gold", gold: "Gold", rainbow: "Rainbow", wet: "Wet", chilled: "Chilled", frozen: "Frozen", thunderstruck: "Thunderstruck", thunder: "Thunderstruck", thundercharged: "Thundercharged", dawnlit: "Dawnlit", dawn: "Dawnlit", dawnlight: "Dawnlit", dawnbound: "Dawnbound", dawncharged: "Dawnbound", amberlit: "Amberlit", ambershine: "Amberlit", amberglow: "Amberlit", amberlight: "Amberlit", amberbound: "Amberbound", ambercharged: "Amberbound" };
+  const normMut = (m) => MUT_NORM[String(m || "").trim().toLowerCase()] || String(m || "");
+  const isColor = (m) => m === "Gold" || m === "Rainbow";
+  const isWeatherMut = (m) => ["Wet", "Chilled", "Frozen", "Thunderstruck", "Thundercharged"].includes(m);
+  const isTimeMut = (m) => ["Dawnlit", "Dawnbound", "Amberlit", "Amberbound"].includes(m);
+  const sizeMult = (sp, size) => { const mx = KD.crops[sp]?.m || 1; if (mx <= 1) return 1; return 1 + (mx - 1) * ((clamp(Math.round(size), CROP_MIN, CROP_MAX) - CROP_MIN) / (CROP_MAX - CROP_MIN)); };
+  const cropWeight = (sp, size) => { const w = KD.crops[sp]?.w; return w > 0 ? w * sizeMult(sp, size) : null; };
+  const friendMult = (players) => 1 + (clamp(Math.floor(Number(players) || 1), 1, 6) - 1) * 0.1;
+  function mutBreakdown(list) {
+    const muts = (Array.isArray(list) ? list : []).map(normMut); let color = 1, wet = false, chilled = false; const weather = new Set(), times = new Set();
+    for (const m of muts) { if (isColor(m)) color = Math.max(color, MUT_X[m] || 1); else if (m === "Wet") wet = true; else if (m === "Chilled") chilled = true; else if (isWeatherMut(m)) weather.add(m); else if (isTimeMut(m)) times.add(m); }
+    if (wet && chilled) weather.add("Frozen"); else if (wet) weather.add("Wet"); else if (chilled) weather.add("Chilled");
+    const best = (set) => { let pick = null, top = -1; for (const m of set) if ((MUT_X[m] || 1) > top) { top = MUT_X[m] || 1; pick = m; } return pick; };
+    const w = best(weather), t = best(times), parts = [w, t].filter(Boolean).map((m) => MUT_X[m] || 1);
+    const wt = parts.length ? parts.reduce((a, b) => a + b, 0) - parts.length + 1 : 1;
+    return { color, weather: w, time: t, wt, total: color * wt };
+  }
+  function cropValue(sp, size, muts, players) {
+    const base = KD.crops[sp]?.p; if (!(base > 0)) return 0;
+    return Math.max(0, Math.round(base * sizeMult(sp, size) * mutBreakdown(muts).total * friendMult(players)));
+  }
+  function readCropSize(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    const direct = Number(obj.size); if (Number.isFinite(direct)) return clamp(Math.round(direct), CROP_MIN, CROP_MAX);
+    const legacy = Number(obj.targetScale ?? obj.scale); if (!Number.isFinite(legacy)) return null;
+    const up = (KD.crops[obj.species]?.m || 2) > 1 ? KD.crops[obj.species].m : 2, v = Math.min(up, Math.max(1, legacy));
+    return clamp(Math.round(CROP_MIN + ((v - 1) / (up - 1)) * (CROP_MAX - CROP_MIN)), CROP_MIN, CROP_MAX);
+  }
+  function petStrength(slot, species) {
+    const info = KD.pets[species]; if (!info) return { s: 0, m: 0 };
+    const maxScale = info.ms > 1 ? info.ms : 1, ts = typeof slot.targetScale === "number" ? slot.targetScale : 1;
+    const m = Math.max(Math.floor((maxScale > 1 ? (ts - 1) / (maxScale - 1) : 0) * 20 + 80), 0);
+    const hours = info.h > 0 ? info.h : 1, xp = Math.max(0, Number(slot.xp) || 0);
+    return { s: Math.min(Math.max(m - 30, 0) + Math.min(Math.floor((xp / (hours * 3600)) * 30), 30), m), m };
+  }
+  function normPet(entry, where) {
+    const slot = entry?.slot && typeof entry.slot === "object" ? entry.slot : entry; if (!slot || typeof slot !== "object") return null;
+    const species = String(slot.petSpecies ?? slot.species ?? ""), id = String(slot.id ?? slot.petId ?? entry?.id ?? ""); if (!species) return null;
+    const info = KD.pets[species], st = petStrength(slot, species), cap = info?.hc || 3000, hunger = Number(slot.hunger) || 0, ts = typeof slot.targetScale === "number" ? slot.targetScale : 1;
+    const mutations = Array.isArray(slot.mutations) ? slot.mutations.map(String) : [];
+    const mult = mutations.reduce((a, m) => a * (KD.mut[m]?.x > 0 ? KD.mut[m].x : 1), 1);
+    const value = st.m > 0 && info ? Math.round(Math.max(0, info.sp * (st.s / st.m) * ts * mult)) : 0;
+    const xp = Math.max(0, Number(slot.xp) || 0), matureXp = (info?.h || 1) * 3600;
+    return { id, species, name: slot.name ? String(slot.name) : "", xp, matureXp, hunger, hungerPct: clamp((hunger / cap) * 100, 0, 100), targetScale: ts, mutations, abilities: Array.isArray(slot.abilities) ? slot.abilities.map(String) : [], strength: st.s, maxStrength: st.m, value, where: where || "" };
+  }
+
+  // ---------- game data readers (extra atoms, same store King's already finds) ----------
+  async function atomValue(label) { const s = await getStore(); if (!s) return null; return readAtom(s, findAtom(label)); }
+  async function readMine() {
+    const data = await atomValue("myDataAtom"); if (!data) return null;
+    const infos = await atomValue("myPetInfosAtom"), prims = (await atomValue("myPredictedPetSlotsAtom")) || (await atomValue("myPrimitivePetSlotsAtom"));
+    const rawActive = Array.isArray(infos) && infos.length ? infos : Array.isArray(prims) ? prims : [];
+    const active = rawActive.map((e) => normPet(e, "Active")).filter(Boolean);
+    const inv = (await atomValue("myInventoryAtom")) || data.inventory || null;
+    const items = Array.isArray(inv?.items) ? inv.items : [];
+    const hutch = (Array.isArray(inv?.storages) ? inv.storages : []).find((s) => s?.id === "PetHutch" || s?.decorId === "PetHutch");
+    const seen = new Set(active.map((p) => p.id)), pets = active.slice();
+    for (const it of items) { if (it?.itemType !== "Pet") continue; const p = normPet(it, "Backpack"); if (p && !seen.has(p.id)) { seen.add(p.id); pets.push(p); } }
+    for (const it of Array.isArray(hutch?.items) ? hutch.items : []) { if (it?.itemType && it.itemType !== "Pet") continue; const p = normPet(it, "Hutch"); if (p && !seen.has(p.id)) { seen.add(p.id); pets.push(p); } }
+    return { data, active, pets, inv, teams: Array.isArray(data.petTeams) ? data.petTeams : [] };
+  }
+  async function readRoomState() { return atomValue("stateAtom"); }
+  const iconBtn = (cls, label, html) => { const b = h("button", cls, html); b.type = "button"; b.title = label; b.setAttribute("aria-label", label); return b; };
+
+  // ---------- window shell (movable, resizable, bookmark tabs) ----------
+  const WINS = {}; let zTop = 2147483620, winCount = 0;
+  const WIN_ICONS = {
+    calc: '<rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M8.5 7.5h7"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01M8.5 16h.01M12 16h.01M15.5 16h.01"/>',
+    deck: '<rect x="4" y="6" width="11" height="15" rx="2"/><path d="M8 3.5h9a2 2 0 0 1 2 2V17"/><circle cx="9.5" cy="12" r="1.6"/><path d="M7 18c.7-1.6 1.7-2.4 2.5-2.4s1.8.8 2.5 2.4"/>',
+    room: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="9" r="2.4"/><path d="M16.5 14.2c2.6.3 4.5 2.4 4.5 5.3"/>',
+    bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.6 2H4.4z"/><path d="M10 21h4"/>'
+  };
+  Object.assign(ICONS, WIN_ICONS);
+  function createWin(o) {
+    const idx = winCount++, rectKey = `mg-king-win-${o.id}-rect-v1`, tabKey = `mg-king-win-${o.id}-tab-v1`;
+    const root = h("div", "kx-win"); root.id = `kx-win-${o.id}`; root.style.setProperty("--ac", o.accent[0]); root.style.setProperty("--ac2", o.accent[1]); root.style.display = "none";
+    root.innerHTML = `<div class="kx-top" title="Drag to move"><span class="kx-mark">${iconSvg(o.icon)}</span><div class="kx-ttl"><h2>${esc(o.title)}</h2><div class="kx-sub"></div></div><div class="kx-tools"></div><button type="button" class="kx-x" data-nodrag title="Close" aria-label="Close">×</button></div><div class="kx-tabs" role="tablist"></div><div class="kx-body"></div><i class="kx-rh" data-edge="r"></i><i class="kx-rh b" data-edge="b"></i><i class="kx-rg" data-edge="br" title="Drag to resize"></i>`;
+    const q = (s) => root.querySelector(s), tabsEl = q(".kx-tabs"), body = q(".kx-body"), sub = q(".kx-sub"), tools = q(".kx-tools");
+    const win = { id: o.id, root, body, tools, tab: readJson(tabKey) || o.tabs[0].id, timer: null, view: null, open: false };
+    const fit = (r) => { const width = clamp(r.width, 300, Math.max(300, window.innerWidth - 8)), height = clamp(r.height, 220, Math.max(220, window.innerHeight - 8)); return { width, height, left: clamp(r.left, 0, Math.max(0, window.innerWidth - width)), top: clamp(r.top, 0, Math.max(0, window.innerHeight - height)) }; };
+    const place = (r) => { const f = fit(r); root.style.left = `${f.left}px`; root.style.top = `${f.top}px`; root.style.width = `${f.width}px`; root.style.height = `${f.height}px`; };
+    const saveRect = () => { const b = root.getBoundingClientRect(); writeJson(rectKey, { left: Math.round(b.left), top: Math.round(b.top), width: Math.round(b.width), height: Math.round(b.height) }); };
+    const defaultRect = () => { const d = document.getElementById(DOCK_ID)?.getBoundingClientRect(), width = Math.min(o.w || 560, window.innerWidth - 16), height = Math.min(o.h || 560, window.innerHeight - 16), off = idx * 26; if (!d) return { left: 12 + off, top: 12 + off, width, height }; return { left: (d.left > window.innerWidth / 2 ? d.left - width - 10 : d.right + 10) - (d.left > window.innerWidth / 2 ? off : -off), top: d.top + off, width, height }; };
+    const front = () => { root.style.zIndex = String(++zTop); };
+    function drawTabs() { tabsEl.innerHTML = ""; for (const t of o.tabs) { const b = h("button", "kx-tab", esc(t.label)); b.type = "button"; b.dataset.tab = t.id; b.setAttribute("role", "tab"); b.dataset.on = String(t.id === win.tab); tabsEl.append(b); } }
+    function render() {
+      const t = o.tabs.find((x) => x.id === win.tab) || o.tabs[0]; win.tab = t.id; drawTabs(); body.replaceChildren(); body.scrollTop = 0;
+      try { win.view = t.render(body, win) || null; } catch (error) { console.error("[King's Mod]", error); body.innerHTML = `<div class="kx-empty">Something went wrong drawing this tab.</div>`; win.view = null; }
+    }
+    win.setSub = (text) => { sub.textContent = text || ""; };
+    win.render = render;
+    win.isOpen = () => win.open;
+    win.openWin = () => { win.open = true; root.style.display = "flex"; const s = readJson(rectKey); place(Number.isFinite(s?.left) && Number.isFinite(s?.width) ? s : defaultRect()); front(); render(); if (win.timer) clearInterval(win.timer); win.timer = setInterval(() => { try { if (!root.contains(document.activeElement) || !/^(input|textarea|select)$/i.test(document.activeElement?.tagName || "")) win.view?.update?.(); } catch {} }, o.every || 1000); refreshActive(); };
+    win.closeWin = () => { win.open = false; root.style.display = "none"; if (win.timer) { clearInterval(win.timer); win.timer = null; } o.onClose?.(); refreshActive(); };
+    win.toggle = () => (win.open ? win.closeWin() : win.openWin());
+    win.reset = () => { try { localStorage.removeItem(rectKey); } catch {} if (win.open) place(defaultRect()); };
+    root.addEventListener("pointerdown", front, true);
+    root.addEventListener("click", (e) => {
+      if (e.target.closest?.(".kx-x")) { win.closeWin(); return; }
+      const tb = e.target.closest?.(".kx-tab"); if (tb && tb.dataset.tab !== win.tab) { win.tab = tb.dataset.tab; writeJson(tabKey, win.tab); render(); }
+    });
+    root.addEventListener("pointerdown", (event) => {
+      const edge = event.target.dataset?.edge; if (!edge || event.button !== 0) return; event.preventDefault();
+      const s = root.getBoundingClientRect(), sx = event.clientX, sy = event.clientY;
+      const move = (e) => place({ left: s.left, top: s.top, width: edge.includes("r") ? s.width + e.clientX - sx : s.width, height: edge.includes("b") ? s.height + e.clientY - sy : s.height });
+      const done = () => { saveRect(); window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", done); window.removeEventListener("pointercancel", done); };
+      window.addEventListener("pointermove", move); window.addEventListener("pointerup", done); window.addEventListener("pointercancel", done);
+    });
+    makeMovable(root, q(".kx-top"), rectKey, () => saveRect());
+    window.addEventListener("resize", () => { if (win.open) { place(root.getBoundingClientRect()); saveRect(); } });
+    win.mount = () => { if (!root.isConnected) document.body.append(root); };
+    WINS[o.id] = win; return win;
+  }
+  const mountWins = () => { for (const w of Object.values(WINS)) w.mount(); };
+
+  // ---------- toasts (used by Alerts and by pet / room actions) ----------
+  let toastBox = null;
+  function toast(title, detail, o = {}) {
+    if (!document.body) return null;
+    if (!toastBox?.isConnected) { toastBox = h("div", "kx-toasts"); document.body.append(toastBox); }
+    const t = h("div", "kx-toast"); t.dataset.kind = o.kind || "info";
+    const icon = h("span", "kx-toast-ic"); if (o.urls) icon.append(spr(o.urls, 34, o.emoji || "🔔")); else icon.textContent = o.emoji || "🔔";
+    const text = h("div", "kx-toast-tx", `<b>${esc(title)}</b>${detail ? `<span>${esc(detail)}</span>` : ""}`);
+    const x = h("button", "kx-toast-x", "×"); x.type = "button"; x.setAttribute("aria-label", "Dismiss");
+    const kill = () => { t.dataset.out = "1"; setTimeout(() => t.remove(), 180); };
+    x.onclick = kill; t.append(icon, text, x); toastBox.prepend(t);
+    while (toastBox.children.length > 5) toastBox.lastElementChild.remove();
+    if (!o.sticky) setTimeout(kill, o.ms || 7000);
+    return kill;
+  }
+  const empty = (emoji, title, hint) => h("div", "kx-empty", `<div class="kx-empty-e">${emoji}</div><b>${esc(title)}</b><span>${esc(hint || "")}</span>`);
+  function segmented(options, value, onPick, cls) {
+    const wrap = h("div", `kx-seg ${cls || ""}`);
+    for (const opt of options) { const b = h("button", "", esc(opt.label ?? opt)); b.type = "button"; b.dataset.v = String(opt.value ?? opt); b.dataset.on = String((opt.value ?? opt) === value); b.onclick = () => { for (const x of wrap.children) x.dataset.on = String(x === b); onPick(opt.value ?? opt); }; wrap.append(b); }
+    wrap.set = (v) => { for (const x of wrap.children) x.dataset.on = String(x.dataset.v === String(v)); };
+    return wrap;
+  }
+
+  // ---------- Calculator: the seed shelf and the market stall ----------
+  const CALC_KEY = "mg-king-calc-v1";
+  const CALC_COLOR = ["None", "Gold", "Rainbow"], CALC_WEATHER = ["None", "Wet", "Chilled", "Frozen", "Thunderstruck", "Thundercharged"], CALC_LIGHT = ["None", "Dawnlit", "Dawnbound", "Amberlit", "Amberbound"];
+  const calcSaved = Object.assign({ species: null, states: {} }, readJson(CALC_KEY) || {});
+  const calcState = (sp) => (calcSaved.states[sp] = Object.assign({ size: 50, color: "None", weather: "None", light: "None", friends: 1 }, calcSaved.states[sp] || {}));
+  const calcMuts = (s) => [s.color, s.weather, s.light].filter((x) => x !== "None");
+  function mutChip(label, on, onClick) {
+    const b = h("button", "kx-mchip"); b.type = "button"; b.dataset.on = String(on);
+    const id = label === "None" ? null : (MUT_ID[label] || label);
+    b.append(id ? spr(SPR.mut(id), 20, "✨") : h("span", "kx-mchip-none", "∅"));
+    b.append(h("span", "", `${esc(label)}${id ? `<small>×${MUT_X[label]}</small>` : ""}`)); b.onclick = onClick; return b;
+  }
+  function renderCalc(body, win) {
+    const species = Object.keys(KD.crops);
+    if (!species.includes(calcSaved.species)) calcSaved.species = species[0];
+    body.classList.add("kx-calc");
+    const shelf = h("div", "kx-shelf"), stall = h("div", "kx-stall");
+    const search = h("input", "kx-search"); search.type = "search"; search.placeholder = "Find a seed"; search.setAttribute("aria-label", "Find a seed");
+    const list = h("div", "kx-packets"); shelf.append(search, list); body.append(shelf, stall);
+    const packets = new Map();
+    for (const sp of species) {
+      const c = KD.crops[sp], b = h("button", "kx-packet"); b.type = "button"; b.style.setProperty("--rc", rarityColour(c.r)); b.title = `${c.sn} · ${c.r}`;
+      b.append(spr(SPR.seed(sp), 34, EMOJI.seed), h("span", "kx-packet-n", esc(c.n))); b.onclick = () => { calcSaved.species = sp; writeJson(CALC_KEY, calcSaved); draw(); }; packets.set(sp, b); list.append(b);
+    }
+    search.oninput = () => { const t = search.value.trim().toLowerCase(); for (const [sp, b] of packets) b.hidden = !!t && !(`${KD.crops[sp].n} ${KD.crops[sp].sn} ${sp}`.toLowerCase().includes(t)); };
+    function draw() {
+      const sp = calcSaved.species, c = KD.crops[sp], s = calcState(sp);
+      for (const [k, b] of packets) b.dataset.on = String(k === sp);
+      packets.get(sp)?.scrollIntoView({ block: "nearest" });
+      stall.replaceChildren();
+      const hero = h("div", "kx-hero"); hero.style.setProperty("--rc", rarityColour(c.r));
+      const stage = h("div", "kx-stage"), name = h("div", "kx-hero-n", `<h3>${esc(c.n)}</h3><span>${esc(c.r)} · ${esc(c.sn)}</span>`);
+      const price = h("div", "kx-price"), weight = h("div", "kx-weight"), brk = h("div", "kx-break");
+      const sizeIn = h("input", "kx-range"); sizeIn.type = "range"; sizeIn.min = CROP_MIN; sizeIn.max = CROP_MAX; sizeIn.step = 1; sizeIn.value = s.size; sizeIn.setAttribute("aria-label", "Size");
+      const sizeLbl = h("b", "kx-size-v");
+      const sizeRow = h("div", "kx-sizerow", `<span>Size</span>`); sizeRow.append(sizeIn, sizeLbl);
+      const jack = h("div", "kx-jack");
+      let spriteKey = "";
+      function refresh() {
+        const muts = calcMuts(s).map((m) => MUT_ID[m] || m), key = `${sp}|${muts.join(",")}`;
+        if (key !== spriteKey) { spriteKey = key; stage.replaceChildren(spr(SPR.crop(sp, muts), 96, EMOJI.crop, "kx-crop")); }
+        stage.firstChild.style.transform = `scale(${0.55 + (s.size - CROP_MIN) / (CROP_MAX - CROP_MIN) * 0.45})`;
+        const mb = mutBreakdown(calcMuts(s)), v = cropValue(sp, s.size, calcMuts(s), s.friends);
+        price.innerHTML = `<i>🪙</i><b>${fmtCoins(v)}</b>`; price.title = `${fmtShort(v)} coins`;
+        const w = cropWeight(sp, s.size); weight.textContent = w ? `${(Math.round(w * 1000) / 1000).toString()} kg at ${s.size}% size` : `${s.size}% size`;
+        sizeLbl.textContent = `${s.size}%`;
+        brk.innerHTML = `<span>${fmtCoins(c.p)} base</span><span>×${sizeMult(sp, s.size).toFixed(2)} size</span><span>×${mb.color} colour</span><span>×${mb.wt} sky</span><span>×${friendMult(s.friends).toFixed(1)} friends</span>`;
+        const top = Math.round(c.p * sizeMult(sp, CROP_MAX) * 50 * 16 * friendMult(s.friends));
+        jack.innerHTML = `<span>Best possible, Rainbow + Thundercharged + Amberbound at full size</span><b>🪙 ${fmtShort(top)}</b>`;
+      }
+      hero.append(stage, h("div", "kx-hero-r")); hero.lastChild.append(name, price, weight);
+      sizeIn.oninput = () => { s.size = Number(sizeIn.value); writeJson(CALC_KEY, calcSaved); refresh(); };
+      const group = (title, labels, field) => {
+        const g = h("div", "kx-mgroup", `<span>${title}</span>`), row = h("div", "kx-mrow");
+        const chips = labels.map((l) => mutChip(l, s[field] === l, () => { s[field] = l; for (const [x, cb] of chips2) cb.dataset.on = String(x === l); writeJson(CALC_KEY, calcSaved); refresh(); }));
+        const chips2 = labels.map((l, i) => [l, chips[i]]); chips.forEach((c2) => row.append(c2)); g.append(row); return g;
+      };
+      const friends = h("div", "kx-mgroup", `<span>Friends in the room</span>`);
+      friends.append(segmented([1, 2, 3, 4, 5, 6].map((n) => ({ label: `${n}${n > 1 ? ` · +${(n - 1) * 10}%` : ""}`, value: n })), s.friends, (v) => { s.friends = v; writeJson(CALC_KEY, calcSaved); refresh(); }, "kx-seg-wrap"));
+      const quick = h("div", "kx-quick"); for (const [t, v] of [["Min", CROP_MIN], ["Max", CROP_MAX]]) { const b = h("button", "", t); b.type = "button"; b.onclick = () => { s.size = v; sizeIn.value = v; writeJson(CALC_KEY, calcSaved); refresh(); }; quick.append(b); }
+      sizeRow.append(quick);
+      stall.append(hero, brk, sizeRow, group("Colour", CALC_COLOR, "color"), group("Weather", CALC_WEATHER, "weather"), group("Time of day", CALC_LIGHT, "light"), friends, jack);
+      refresh();
+    }
+    draw(); win.setSub("What a crop sells for");
+    return null;
+  }
+
+  // ---------- Pet Deck: active pets, native teams, collection, ability log ----------
+  const abilityName = (id) => KD.abil[id]?.n || pretty(id);
+  function abilityTone(id) {
+    if (/Gold|Rainbow/.test(id)) return "#ffd166"; if (/Granter|RainDance/.test(id)) return "#f59ac8"; if (/Coin|Sell/.test(id)) return "#f2c94c"; if (/Hunger/.test(id)) return "#fb923c";
+    if (/Xp|Age|HatchSize/.test(id)) return "#b794f6"; if (/Egg/.test(id)) return "#7dd3fc"; if (/Growth/.test(id)) return "#a3e635"; if (/Scale/.test(id)) return "#4ade80"; if (/Seed|Refund|Double/.test(id)) return "#5eead4"; if (/Kisser|Dawn|Amber/.test(id)) return "#fca5a5"; return "#a7b8ae";
+  }
+  const abilityChips = (list) => (list || []).map((a) => `<span class="kx-ab" style="--t:${abilityTone(a)}" title="${esc(KD.abil[a]?.d || "")}">${esc(abilityName(a))}</span>`).join("");
+  const mutBadges = (list) => (list || []).map((m) => `<span class="kx-mb" data-m="${esc(m)}">${esc(KD.mut[m]?.n || pretty(m))}</span>`).join("");
+  const petUrls = (p) => SPR.pet(p.species, p.mutations);
+  const sameIds = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+  function hungerLeft(p) { const mins = (KD.pets[p.species]?.hd || 60) * (p.hungerPct / 100); return mins >= 90 ? `${Math.round(mins / 60 * 10) / 10}h` : `${Math.max(0, Math.round(mins))}m`; }
+  function petCard(p, o = {}) {
+    const info = KD.pets[p.species], card = h("div", `kx-pc${o.small ? " sm" : ""}`); card.style.setProperty("--rc", rarityColour(info?.r));
+    const frame = h("div", "kx-pc-f"); frame.append(spr(petUrls(p), o.small ? 54 : 72, EMOJI.pet));
+    const sr = p.maxStrength ? Math.round((p.strength / p.maxStrength) * 100) : 0;
+    const title = `${esc(p.name || info?.n || p.species)}${p.name ? `<small>${esc(info?.n || p.species)}</small>` : ""}`;
+    const meta = h("div", "kx-pc-m", `<div class="kx-pc-t">${title}</div><div class="kx-str"><span style="width:${sr}%"></span><b>${p.strength}<i>/${p.maxStrength}</i></b></div>`);
+    card.append(frame, meta);
+    if (!o.small) {
+      const hungry = p.hungerPct < 25;
+      meta.insertAdjacentHTML("beforeend", `<div class="kx-bars"><label>Hunger<div class="kx-bar" data-w="${hungry ? 1 : 0}"><i style="width:${p.hungerPct}%"></i></div><em>${Math.round(p.hungerPct)}% · about ${hungerLeft(p)}</em></label><label>Growth<div class="kx-bar xp"><i style="width:${Math.min(100, (p.xp / p.matureXp) * 100)}%"></i></div><em>${Math.min(100, Math.round((p.xp / p.matureXp) * 100))}%</em></label></div><div class="kx-abs">${abilityChips(p.abilities)}${mutBadges(p.mutations)}</div><div class="kx-pc-v">Sells for 🪙 ${fmtShort(p.value)}</div>`);
+    } else card.title = `${p.name || info?.n || p.species} · ${p.where}`;
+    return card;
+  }
+  function teamMembers(team, byId) { return (Array.isArray(team?.members) ? team.members : []).map((m) => String(m?.petId || "")).filter(Boolean).map((id) => byId.get(id) || { id, missing: true }); }
+  function petsActive(body, win) {
+    const box = h("div", "kx-pcs"); body.append(box); win.setSub("The pets working in your garden");
+    async function update() {
+      const me = await readMine(); const sig = JSON.stringify((me?.active || []).map((p) => [p.id, Math.round(p.hungerPct), p.strength, Math.round(p.xp / 60)])); if (sig === box.dataset.sig) return; box.dataset.sig = sig;
+      box.replaceChildren(); if (!me) { box.append(empty("🌿", "Waiting for the game", "Your pets appear once the garden has loaded.")); return; }
+      if (!me.active.length) { box.append(empty("🐾", "No pets out", "Place a pet in your garden and it shows up here.")); return; }
+      const total = me.active.reduce((a, p) => a + p.strength, 0); win.setSub(`${me.active.length} out · ${total} strength together`);
+      for (const p of me.active) box.append(petCard(p));
+    }
+    update(); return { update };
+  }
+  function petsTeams(body, win) {
+    const saveRow = h("div", "kx-saverow"), nameIn = h("input", "kx-search"); nameIn.maxLength = 16; nameIn.placeholder = "Name this lineup"; nameIn.setAttribute("aria-label", "Team name");
+    const saveBtn = h("button", "kx-btn", "Save pets that are out"); saveBtn.type = "button"; saveRow.append(nameIn, saveBtn);
+    const list = h("div", "kx-teams"); body.append(saveRow, list); win.setSub("Teams are stored by the game, so they follow you");
+    let me = null;
+    saveBtn.onclick = () => {
+      const ids = (me?.active || []).map((p) => p.id).filter(Boolean).slice(0, 3); const name = nameIn.value.trim() || `Team ${(me?.teams?.length || 0) + 1}`;
+      if (!ids.length) { toast("Nothing to save", "Put a pet out first.", { emoji: "🐾" }); return; }
+      if (!sendGame({ type: "SavePetTeam", teamId: randomId(), isCreate: true, name, petIds: ids })) { toast("Could not reach the game", "Reload the page and try again.", { emoji: "⚠️", kind: "warn" }); return; }
+      nameIn.value = ""; toast("Team saved", name, { emoji: "💾" });
+    };
+    async function update() {
+      me = await readMine(); if (!me) return;
+      const byId = new Map(me.pets.map((p) => [p.id, p])), active = me.active.map((p) => p.id);
+      const sig = JSON.stringify([me.teams.map((t) => [t.id, t.name, (t.members || []).map((m) => m.petId)]), active]); if (sig === list.dataset.sig) return; list.dataset.sig = sig; list.replaceChildren();
+      saveBtn.disabled = !active.length;
+      if (!me.teams.length) { list.append(empty("📋", "No teams yet", "Save the pets that are out and swap back to them in one click.")); return; }
+      for (const t of me.teams) {
+        const members = teamMembers(t, byId), ids = members.map((m) => m.id), isOn = sameIds(ids, active) && ids.length > 0;
+        const row = h("div", "kx-team"); row.dataset.on = String(isOn);
+        const faces = h("div", "kx-faces"); for (const m of members) faces.append(m.missing ? h("span", "kx-face-x", "?") : spr(petUrls(m), 44, EMOJI.pet, "kx-face"));
+        const total = members.reduce((a, m) => a + (m.strength || 0), 0);
+        const info = h("div", "kx-team-i", `<b>${esc(t.name || "Team")}</b><span>${members.length} pet${members.length === 1 ? "" : "s"} · ${total} strength${isOn ? " · out now" : ""}</span>`);
+        const use = h("button", "kx-btn", isOn ? "Out now" : "Send out"); use.type = "button"; use.disabled = isOn;
+        use.onclick = () => { if (sendGame({ type: "ApplyPetTeam", teamId: t.id })) toast("Switching team", t.name || "Team", { emoji: "🔄" }); else toast("Could not reach the game", "Reload the page and try again.", { emoji: "⚠️", kind: "warn" }); };
+        const del = h("button", "kx-btn ghost", "Delete"); del.type = "button"; let armed = false;
+        del.onclick = () => { if (!armed) { armed = true; del.textContent = "Sure?"; setTimeout(() => { armed = false; del.textContent = "Delete"; }, 2500); return; } sendGame({ type: "DeletePetTeam", teamId: t.id }); };
+        row.append(faces, info, use, del); list.append(row);
+      }
+    }
+    update(); return { update };
+  }
+  function petsCollection(body, win) {
+    const bar = h("div", "kx-filters"), search = h("input", "kx-search"); search.type = "search"; search.placeholder = "Find a pet"; search.setAttribute("aria-label", "Find a pet");
+    let sort = "strength", where = "all";
+    const sortSeg = segmented([{ label: "Strongest", value: "strength" }, { label: "Worth most", value: "value" }, { label: "Hungriest", value: "hunger" }], sort, (v) => { sort = v; paint(); });
+    const whereSeg = segmented([{ label: "All", value: "all" }, { label: "Out", value: "Active" }, { label: "Backpack", value: "Backpack" }, { label: "Hutch", value: "Hutch" }], where, (v) => { where = v; paint(); });
+    bar.append(search, sortSeg, whereSeg); const grid = h("div", "kx-grid"); body.append(bar, grid); let all = [];
+    function paint() {
+      const t = search.value.trim().toLowerCase(); const rows = all.filter((p) => (where === "all" || p.where === where) && (!t || `${p.name} ${KD.pets[p.species]?.n || p.species}`.toLowerCase().includes(t)));
+      rows.sort((a, b) => (sort === "value" ? b.value - a.value : sort === "hunger" ? a.hungerPct - b.hungerPct : b.strength - a.strength || b.value - a.value));
+      grid.replaceChildren(); win.setSub(`${rows.length} of ${all.length} pets`);
+      if (!rows.length) { grid.append(empty("🔍", "No pets match", "Try another filter.")); return; }
+      for (const p of rows) { const c = petCard(p, { small: true }); c.append(h("div", "kx-pc-w", esc(p.where))); grid.append(c); }
+    }
+    search.oninput = paint;
+    async function update() { const me = await readMine(); if (!me) return; const sig = JSON.stringify(me.pets.map((p) => [p.id, p.strength, p.where, Math.round(p.hungerPct / 5)])); if (sig === grid.dataset.sig) return; grid.dataset.sig = sig; all = me.pets; paint(); }
+    update(); return { update };
+  }
+  function petsLog(body, win) {
+    const chips = h("div", "kx-logchips"), list = h("div", "kx-log"); body.append(chips, list); win.setSub("Recent ability activity the game remembers");
+    async function update() {
+      const me = await readMine(); const logs = (Array.isArray(me?.data?.activityLogs) ? me.data.activityLogs : []).filter((e) => KD.abil[e?.action] && e?.parameters?.pet);
+      const sig = logs.length + ":" + (logs[logs.length - 1]?.timestamp || 0); if (sig === list.dataset.sig) return; list.dataset.sig = sig; list.replaceChildren(); chips.replaceChildren();
+      if (!logs.length) { list.append(empty("📜", "Nothing logged yet", "Abilities show up here as your pets use them.")); return; }
+      const counts = new Map(); for (const e of logs) counts.set(e.action, (counts.get(e.action) || 0) + 1);
+      for (const [a, n] of [...counts].sort((x, y) => y[1] - x[1]).slice(0, 8)) chips.insertAdjacentHTML("beforeend", `<span class="kx-ab" style="--t:${abilityTone(a)}">${esc(abilityName(a))} <b>${n}</b></span>`);
+      for (const e of logs.slice(-80).reverse()) {
+        const pet = normPet(e.parameters.pet, ""), prm = e.parameters, row = h("div", "kx-logrow");
+        let text = KD.abil[e.action]?.d || ""; const gs = prm.growSlot?.species; if (gs) text = `Crop: ${KD.crops[gs]?.n || pretty(gs)}`; else if (prm.coinsFound != null) text = `Found ${fmtCoins(prm.coinsFound)} coins`; else if (prm.bonusCoins != null) text = `+${fmtCoins(prm.bonusCoins)} coins`;
+        row.append(pet ? spr(petUrls(pet), 34, EMOJI.pet) : h("span"), h("div", "", `<b>${esc(abilityName(e.action))}</b><span>${esc(pet?.name || KD.pets[pet?.species]?.n || "")} · ${esc(text)}</span>`), h("time", "", new Date(Number(e.timestamp)).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))); list.append(row);
+      }
+    }
+    update(); return { update };
+  }
+
+  // ---------- Suggested teams: the best three pets you own for a goal ----------
+  const TEAM_GOALS = [
+    { id: "size", name: "Bigger crops", emoji: "📏", abil: ["ProduceScaleBoostIII", "ProduceScaleBoostII", "ProduceScaleBoost"] },
+    { id: "growth", name: "Faster plants", emoji: "🌱", abil: ["PlantGrowthBoostIII", "PlantGrowthBoostII", "PlantGrowthBoost"] },
+    { id: "egg", name: "Faster eggs", emoji: "🥚", abil: ["EggGrowthBoostII", "EggGrowthBoostII_NEW", "EggGrowthBoost"] },
+    { id: "xp", name: "Pet XP", emoji: "⭐", abil: ["PetXpBoostIII", "PetXpBoostII", "PetXpBoost", "PetAgeBoostIII", "PetAgeBoostII", "PetAgeBoost"] },
+    { id: "hatch", name: "Stronger hatches", emoji: "💪", abil: ["PetHatchSizeBoostIII", "PetHatchSizeBoostII", "PetHatchSizeBoost"] },
+    { id: "coins", name: "More coins", emoji: "🪙", abil: ["CoinFinderIII", "CoinFinderII", "CoinFinderI", "SellBoostIV", "SellBoostIII", "SellBoostII", "SellBoostI"] },
+    { id: "gold", name: "Gold and Rainbow", emoji: "🌈", abil: ["RainbowGranter", "GoldGranter"], wants: true },
+    { id: "wx", name: "Weather mutations", emoji: "🌦️", abil: ["RainDance", "FrostGranter", "SnowGranter", "DawnlitGranter", "AmberlitGranter", "ProduceMutationBoostIII", "ProduceMutationBoostII", "ProduceMutationBoost"] },
+    { id: "seed", name: "Seeds and doubles", emoji: "🌾", abil: ["SeedFinderIV", "SeedFinderIII", "SeedFinderII", "SeedFinderI", "DoubleHarvest", "DoubleHatch"] }
+  ];
+  const SUSTAIN = ["HungerRestoreIII", "HungerRestoreII", "HungerRestore", "SnowyHungerRestore", "HungerBoostIII", "HungerBoostII", "HungerBoost", "SnowyHungerBoost"];
+  function goalScore(pet, goal) {
+    let best = 0; for (const a of pet.abilities) { const i = goal.abil.indexOf(a); if (i >= 0) best = Math.max(best, (goal.abil.length - i) * 10 + 5); }
+    if (!best) return 0; return best * (0.5 + pet.strength / Math.max(1, pet.maxStrength || 100) * 0.5) + pet.strength / 10;
+  }
+  function suggestTeam(pets, goal) {
+    const unwanted = (p) => !goal.wants && p.abilities.some((a) => /GoldGranter|RainbowGranter/.test(a));
+    const ranked = pets.map((p) => ({ p, sc: goalScore(p, goal) })).filter((x) => x.sc > 0 && !unwanted(x.p)).sort((a, b) => b.sc - a.sc);
+    if (!ranked.length) return null;
+    const team = []; const species = new Set();
+    for (const x of ranked) { if (team.length >= 3) break; team.push(x.p); species.add(x.p.id); }
+    const sustainScore = (p) => p.abilities.some((a) => SUSTAIN.includes(a)) ? 1 : 0;
+    if (!team.some(sustainScore)) { const feeder = pets.filter((p) => sustainScore(p) && !species.has(p.id) && !unwanted(p)).sort((a, b) => b.strength - a.strength)[0]; if (feeder) { if (team.length >= 3) team[team.length - 1] = feeder; else team.push(feeder); } }
+    for (const p of pets.slice().sort((a, b) => b.strength - a.strength)) { if (team.length >= 3) break; if (!team.some((t) => t.id === p.id) && !unwanted(p)) team.push(p); }
+    return team.slice(0, 3);
+  }
+  function petsSuggest(body, win) {
+    const note = h("p", "kx-muted", "Picked from every pet you own. One slot goes to a pet that keeps the team fed when you have one."); const list = h("div", "kx-teams"); body.append(note, list); win.setSub("Best three pets for what you want to do");
+    let me = null;
+    const give = (team, goal, sendOut) => {
+      const ids = team.map((p) => p.id); const name = goal.name.slice(0, 16); const existing = (me?.teams || []).find((t) => t.name === name);
+      const id = existing?.id || randomId();
+      if (!sendGame({ type: "SavePetTeam", teamId: id, isCreate: !existing, name, petIds: ids })) { toast("Could not reach the game", "Reload the page and try again.", { emoji: "⚠️", kind: "warn" }); return; }
+      if (!sendOut) { toast("Team saved", name, { emoji: "💾" }); return; }
+      setTimeout(() => { sendGame({ type: "ApplyPetTeam", teamId: id }); toast("Switching team", name, { emoji: "🔄" }); }, 900);
+    };
+    async function update() {
+      me = await readMine(); if (!me) return;
+      const sig = JSON.stringify([me.pets.map((p) => [p.id, p.strength, p.abilities.join()]), me.active.map((p) => p.id)]); if (sig === list.dataset.sig) return; list.dataset.sig = sig; list.replaceChildren();
+      if (!me.pets.length) { list.append(empty("🐾", "No pets yet", "Hatch a few and suggestions appear here.")); return; }
+      let shown = 0;
+      for (const goal of TEAM_GOALS) {
+        const team = suggestTeam(me.pets, goal); if (!team) continue; shown++;
+        const isOn = sameIds(team.map((p) => p.id), me.active.map((p) => p.id)), row = h("div", "kx-team"); row.dataset.on = String(isOn);
+        const faces = h("div", "kx-faces"); for (const m of team) faces.append(spr(petUrls(m), 44, EMOJI.pet, "kx-face"));
+        const covers = [...new Set(team.flatMap((p) => p.abilities.filter((a) => goal.abil.includes(a))))].map(abilityName).join(", ");
+        const info = h("div", "kx-team-i", `<b>${goal.emoji} ${esc(goal.name)}</b><span>${esc(covers || "Your strongest pets")} · ${team.reduce((a, p) => a + p.strength, 0)} strength${isOn ? " · out now" : ""}</span>`);
+        const go = h("button", "kx-btn", isOn ? "Out now" : "Send out"); go.type = "button"; go.disabled = isOn; go.onclick = () => give(team, goal, true);
+        const sv = h("button", "kx-btn ghost", "Save"); sv.type = "button"; sv.onclick = () => give(team, goal, false);
+        row.append(faces, info, go, sv); list.append(row);
+      }
+      if (!shown) list.append(empty("🔍", "No matches yet", "None of your pets have abilities for these goals."));
+    }
+    update(); return { update };
+  }
+
+  createWin({ id: "pets", title: "Pet Deck", icon: "deck", accent: ["#f4978a", "#f7c59f"], w: 600, h: 600, every: 1500, tabs: [{ id: "active", label: "Out now", render: petsActive }, { id: "teams", label: "Teams", render: petsTeams }, { id: "best", label: "Suggested", render: petsSuggest }, { id: "all", label: "Collection", render: petsCollection }, { id: "log", label: "Ability log", render: petsLog }] });
+
+  // ---------- Room: who is here, what they hold, and a ride to their garden ----------
+  const arr = (v) => (Array.isArray(v) ? v : []);
+  function roomPlayers(state) {
+    const direct = state?.fullState?.data?.players ?? state?.data?.players ?? state?.players; let players = Array.isArray(direct) ? direct : [];
+    if (!players.length && state && typeof state === "object") { const seen = new Set(), stack = [state]; while (stack.length && !players.length) { const cur = stack.pop(); if (!cur || typeof cur !== "object" || seen.has(cur)) continue; seen.add(cur); for (const k of Object.keys(cur)) { const v = cur[k]; if (Array.isArray(v) && v.length && v.every((x) => x && typeof x === "object") && v.some((p) => "id" in p && "name" in p) && /player/i.test(k)) { players = v; break; } if (v && typeof v === "object") stack.push(v); } } }
+    return players;
+  }
+  function roomSlots(state) {
+    const raw = state?.child?.data?.userSlots ?? state?.fullState?.child?.data?.userSlots ?? state?.data?.userSlots;
+    if (Array.isArray(raw)) return raw; if (raw && typeof raw === "object") return Object.entries(raw).sort((a, b) => (Number(a[0]) - Number(b[0])) || a[0].localeCompare(b[0])).map(([, v]) => v); return [];
+  }
+  const slotOwner = (slot) => { const r = slot?.userId ?? slot?.playerId ?? slot?.id; return r != null ? String(r) : ""; };
+  async function roomList() {
+    const state = await readRoomState(); if (!state) return { players: [], slots: [], state: null };
+    const players = roomPlayers(state), slots = roomSlots(state), byId = new Map(players.map((p) => [String(p.id), p])), ordered = [], seen = new Set();
+    for (const s of slots) { const id = slotOwner(s); const p = byId.get(id); if (p && !seen.has(id)) { ordered.push({ ...p, slot: s }); seen.add(id); } }
+    for (const p of players) if (!seen.has(String(p.id))) ordered.push({ ...p, slot: null });
+    const map = await atomValue("mapAtom"), spawns = arr(map?.spawnTiles).filter(Number.isFinite).sort((a, b) => a - b);
+    ordered.forEach((p, i) => { p.tile = spawns[i] ?? null; }); return { players: ordered, slots, state, cols: Number(map?.cols) > 0 ? Number(map.cols) : 81 };
+  }
+  const peopleNow = async (fallback) => { const n = Math.floor(Number(await atomValue("numPlayersAtom"))); return Number.isFinite(n) && n > 0 ? clamp(n, 1, 6) : clamp(fallback || 1, 1, 6); };
+  function gardenWorth(slot, people) { let sum = 0; for (const t of Object.values(slot?.data?.garden?.tileObjects || {})) { if (t?.objectType !== "plant") continue; for (const s of arr(t.slots)) { const sz = readCropSize({ ...s, species: s?.species || t.species }); if (sz != null) sum += cropValue(s?.species || t.species, sz, s?.mutations, people); } } return sum; }
+  function invWorth(slot, people) { let sum = 0; for (const it of arr(slot?.data?.inventory?.items)) { if (it?.itemType !== "Produce") continue; const sz = readCropSize(it); if (sz != null) sum += cropValue(it.species, sz, it.mutations, people); } return sum; }
+  function avatar(p, big) {
+    const a = h("span", `kx-av${big ? " big" : ""}`); if (p.discordAvatarUrl) a.style.backgroundImage = `url(${p.discordAvatarUrl})`; else a.textContent = (p.name || "?").charAt(0).toUpperCase();
+    a.append(h("i", p.isConnected ? "on" : "")); a.title = p.isConnected ? "Online" : "Offline"; return a;
+  }
+  function visitGarden(p, cols) {
+    if (p.tile == null) { toast("No garden spot", "This player has no garden position yet.", { emoji: "📍", kind: "warn" }); return; }
+    const x = p.tile % cols, y = Math.floor(p.tile / cols);
+    (async () => { try { const s = await getStore(), a = findAtom("positionAtom"); if (s && a) s.set(a, { x, y }); } catch {} sendGame({ type: "Teleport", position: { x, y } }); toast("Off you go", `${p.name || "Their"} garden`, { emoji: "🚪" }); })();
+  }
+  function itemTile(it, people) {
+    const t = h("div", "kx-it"); let urls = [], emoji = "📦", name = pretty(it.itemType), sub = "", tip = "";
+    switch (it.itemType) {
+      case "Produce": { const sz = readCropSize(it) ?? 50; urls = SPR.crop(it.species, arr(it.mutations).map((m) => MUT_ID[normMut(m)] || m)); emoji = EMOJI.crop; name = KD.crops[it.species]?.n || pretty(it.species); sub = `🪙 ${fmtShort(cropValue(it.species, sz, it.mutations, people))}`; tip = `${sz}% size`; break; }
+      case "Seed": urls = SPR.seed(it.species); emoji = EMOJI.seed; name = KD.crops[it.species]?.sn || pretty(it.species); sub = `×${it.quantity ?? 1}`; break;
+      case "Egg": urls = SPR.egg(it.eggId); emoji = EMOJI.egg; name = KD.eggs[it.eggId]?.n || pretty(it.eggId); sub = `×${it.quantity ?? 1}`; break;
+      case "Tool": urls = SPR.tool(it.toolId); emoji = EMOJI.tool; name = KD.tools[it.toolId]?.n || pretty(it.toolId); sub = `×${it.quantity ?? 1}`; break;
+      case "Decor": urls = SPR.decor(it.decorId); emoji = EMOJI.decor; name = KD.decor[it.decorId]?.n || pretty(it.decorId); sub = `×${it.quantity ?? 1}`; break;
+      case "Pet": { const p = normPet(it, ""); if (p) { urls = petUrls(p); emoji = EMOJI.pet; name = p.name || KD.pets[p.species]?.n || p.species; sub = `${p.strength} str`; } break; }
+    }
+    t.append(spr(urls, 40, emoji), h("b", "", esc(name)), h("span", "", esc(sub))); if (tip) t.title = tip; return t;
+  }
+  function roomInventory(slot, people) {
+    const items = arr(slot?.data?.inventory?.items); const wrap = h("div", "kx-grid"); if (!items.length) return empty("🎒", "Empty backpack", "Nothing in this inventory yet.");
+    const order = ["Produce", "Pet", "Seed", "Egg", "Tool", "Decor"]; items.sort((a, b) => order.indexOf(a.itemType) - order.indexOf(b.itemType));
+    for (const it of items) wrap.append(itemTile(it, people)); return wrap;
+  }
+  function roomJournal(slot) {
+    const j = slot?.data?.journal ?? slot?.journal; const prod = j?.produce || {}, pets = j?.pets || {}; if (!Object.keys(prod).length && !Object.keys(pets).length) return empty("📖", "Journal is blank", "No discoveries recorded for this player.");
+    const wrap = h("div", "kx-jr"); const sec = (title, entries, urlOf, nameOf, emoji) => { wrap.append(h("h4", "", esc(title))); const g = h("div", "kx-grid"); for (const [k, v] of entries) { const n = arr(v?.variantsLogged).length + arr(v?.abilitiesLogged).length; const t = h("div", "kx-it"); t.append(spr(urlOf(k), 40, emoji), h("b", "", esc(nameOf(k))), h("span", "", `${n} logged`)); g.append(t); } wrap.append(g); };
+    sec(`Crops · ${Object.keys(prod).length}`, Object.entries(prod), SPR.crop, (k) => KD.crops[k]?.n || pretty(k), EMOJI.crop); sec(`Pets · ${Object.keys(pets).length}`, Object.entries(pets), (k) => SPR.pet(k), (k) => KD.pets[k]?.n || pretty(k), EMOJI.pet); return wrap;
+  }
+  function roomStats(slot) {
+    const st = slot?.data?.stats ?? slot?.stats; const rows = Object.entries(st || {}).filter(([, v]) => typeof v === "number"); if (!rows.length) return empty("📊", "No stats", "Nothing counted for this player yet.");
+    const wrap = h("div", "kx-stats"); for (const [k, v] of rows.sort((a, b) => b[1] - a[1])) wrap.append(h("div", "", `<span>${esc(pretty(k))}</span><b>${fmtCoins(v)}</b>`)); return wrap;
+  }
+  function renderRoom(body, win) {
+    body.classList.add("kx-roomb"); const side = h("div", "kx-guests"), main = h("div", "kx-guest"); body.append(side, main);
+    let data = { players: [], cols: 81 }, picked = null, sub = "inv", lastSig = "";
+    let showSeq = 0;
+    function showGuest() {
+      const p = data.players.find((x) => String(x.id) === picked), seq = ++showSeq; main.replaceChildren();
+      if (!p) { main.append(empty("👥", data.players.length ? "Pick a guest" : "Nobody here yet", "Players show up as they join the room.")); return; }
+      try {
+        const people = clamp(data.players.length || 1, 1, 6);
+        const head = h("div", "kx-ghead"); head.append(avatar(p, true), h("div", "kx-gname", `<h3>${esc(p.name || p.id)}</h3><span>${p.isConnected ? "Online" : "Offline"}${p.slot ? "" : " · no garden data yet"}</span>`));
+        const go = h("button", "kx-btn", "Visit garden"); go.type = "button"; go.onclick = () => visitGarden(p, data.cols); head.append(go);
+        const safe = (fn) => { try { return fn(); } catch (error) { console.warn("[King's Mod] room", error); return 0; } };
+        const vals = h("div", "kx-vals", `<div><span>Backpack crops</span><b>🪙 ${fmtShort(safe(() => invWorth(p.slot, people)))}</b></div><div><span>Garden crops</span><b>🪙 ${fmtShort(safe(() => gardenWorth(p.slot, people)))}</b></div>`);
+        const content = h("div", "kx-gc");
+        const fill = () => { let node; try { node = sub === "inv" ? roomInventory(p.slot, people) : sub === "jr" ? roomJournal(p.slot) : roomStats(p.slot); } catch (error) { console.warn("[King's Mod] room", error); node = empty("⚠️", "Could not show this", String(error?.message || error)); } content.replaceChildren(node); };
+        const seg = segmented([{ label: "Backpack", value: "inv" }, { label: "Journal", value: "jr" }, { label: "Stats", value: "st" }], sub, (v) => { sub = v; fill(); });
+        main.append(head, vals, seg, content); fill();
+        peopleNow(data.players.length).then((n) => { if (seq !== showSeq || n === people) return; vals.innerHTML = `<div><span>Backpack crops</span><b>🪙 ${fmtShort(safe(() => invWorth(p.slot, n)))}</b></div><div><span>Garden crops</span><b>🪙 ${fmtShort(safe(() => gardenWorth(p.slot, n)))}</b></div>`; fill2(n); }).catch(() => {});
+        function fill2(n) { if (sub === "inv") { try { content.replaceChildren(roomInventory(p.slot, n)); } catch {} } }
+      } catch (error) { console.error("[King's Mod] room", error); main.replaceChildren(empty("⚠️", "Could not open this guest", String(error?.message || error))); }
+    }
+    function drawSide() {
+      side.replaceChildren(); for (const p of data.players) { const b = h("button", "kx-gb"); b.type = "button"; b.dataset.on = String(String(p.id) === picked); b.append(avatar(p), h("span", "", `<b>${esc(p.name || p.id)}</b><small>${p.isConnected ? "Online" : "Offline"}</small>`)); b.onclick = () => { picked = String(p.id); drawSide(); showGuest(); }; side.append(b); }
+    }
+    async function update() {
+      data = await roomList(); const sig = data.players.map((p) => `${p.id}|${p.name}|${p.isConnected ? 1 : 0}`).join(";"); win.setSub(`${data.players.length} in the room · +${(clamp(data.players.length, 1, 6) - 1) * 10}% friend bonus`);
+      if (sig === lastSig) return; lastSig = sig; if (!picked || !data.players.some((p) => String(p.id) === picked)) picked = data.players[0] ? String(data.players[0].id) : null; drawSide(); showGuest();
+    }
+    update(); return { update };
+  }
+  createWin({ id: "room", title: "Room", icon: "room", accent: ["#7cc4f0", "#a8e6cf"], w: 620, h: 580, every: 3000, tabs: [{ id: "guests", label: "Guests", render: renderRoom }] });
+
+  // ---------- Alerts: shop restocks, weather and hungry pets ----------
+    const AL = Object.assign({ enabled: true, sound: "chime", volume: 0.6, toasts: true, repeat: false, every: 20, follow: {}, weather: {}, hunger: { on: true, pct: 25, muted: {} } }, readJson(ALERT_KEY) || {});
+  AL.hunger = Object.assign({ on: true, pct: 25, muted: {} }, AL.hunger || {});
+  const saveAL = () => writeJson(ALERT_KEY, AL);
+  saveAL();
+  const SOUNDS = { chime: "Chime", bell: "Bell", harp: "Harp", pulse: "Pulse", off: "Silent" };
+  const WEATHER_ALERTS = [{ id: "Rain", name: "Rain", emoji: "🌧️", mut: "Wet" }, { id: "Frost", name: "Snow", emoji: "❄️", mut: "Frozen" }, { id: "Thunderstorm", name: "Thunderstorm", emoji: "⛈️", mut: "Thunderstruck" }, { id: "Dawn", name: "Dawn", emoji: "🌅", mut: "Dawnlit" }, { id: "AmberMoon", name: "Amber Moon", emoji: "🌙", mut: "Amberlit" }];
+  let audioCtx = null;
+  document.addEventListener("pointerdown", () => { try { if (!audioCtx) audioCtx = new (PW.AudioContext || PW.webkitAudioContext || window.AudioContext)(); audioCtx.state === "suspended" && audioCtx.resume(); } catch {} }, true);
+  function playSound(kind = AL.sound) {
+    if (kind === "off" || !audioCtx) return; const vol = clamp(AL.volume, 0, 1) * 0.35, t0 = audioCtx.currentTime;
+    const tone = (f, at, dur, type = "sine", g = 1) => { const o = audioCtx.createOscillator(), gn = audioCtx.createGain(); o.type = type; o.frequency.value = f; gn.gain.setValueAtTime(0.0001, t0 + at); gn.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol * g), t0 + at + 0.02); gn.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur); o.connect(gn).connect(audioCtx.destination); o.start(t0 + at); o.stop(t0 + at + dur + 0.05); };
+    if (kind === "chime") { tone(880, 0, 0.5); tone(1320, 0.14, 0.7); }
+    else if (kind === "bell") { tone(660, 0, 1.2, "triangle"); tone(1320, 0, 0.8, "sine", 0.4); tone(1980, 0, 0.5, "sine", 0.2); }
+    else if (kind === "harp") [523, 659, 784, 1047].forEach((f, i) => tone(f, i * 0.09, 0.6, "triangle"));
+    else { for (let i = 0; i < 3; i++) tone(740, i * 0.16, 0.1, "square", 0.5); }
+  }
+  const alertLog = []; const live = new Map();   // live: alert id -> { last }
+  function fire(id, title, detail, o = {}) {
+    alertLog.unshift({ at: Date.now(), title, detail, emoji: o.emoji }); alertLog.length = Math.min(alertLog.length, 30);
+    if (AL.toasts) toast(title, detail, { urls: o.urls, emoji: o.emoji, kind: "alert", ms: 9000 }); playSound();
+  }
+  function shopItems(game, me) {
+    const out = new Map(), shops = game?.shops; if (!shops || typeof shops !== "object") return out;
+    const kinds = { Seed: ["species", "Seed"], Egg: ["eggId", "Egg"], Tool: ["toolId", "Tool"], Decor: ["decorId", "Decor"] };
+    for (const [shopKey, shop] of Object.entries(shops)) {
+      if (!shop || !Array.isArray(shop.inventory)) continue; const sp = me?.shopPurchases?.[shopKey], valid = sp && (!("restockId" in sp) || sp.restockId === shop.restockId);
+      for (const it of shop.inventory) { const k = kinds[it?.itemType]; if (!k || it[k[0]] == null) continue; const id = `${k[1]}:${it[k[0]]}`, left = Math.max(0, Number(it.initialStock) - (Number(valid ? sp.purchases?.[it[k[0]]] : 0) || 0)); out.set(id, { left: (out.get(id)?.left || 0) + left, restock: shop.restockId || "" }); }
+    }
+    return out;
+  }
+  function shopMeta(id) {
+    const [type, key] = id.split(":");
+    if (type === "Seed") { const c = KD.crops[key]; return { name: c?.sn || pretty(key), r: c?.r, urls: SPR.seed(key), emoji: EMOJI.seed }; }
+    if (type === "Egg") { const c = KD.eggs[key]; return { name: c?.n || pretty(key), r: c?.r, urls: SPR.egg(key), emoji: EMOJI.egg }; }
+    if (type === "Tool") { const c = KD.tools[key]; return { name: c?.n || pretty(key), r: c?.r, urls: SPR.tool(key), emoji: EMOJI.tool }; }
+    const c = KD.decor[key]; return { name: c?.n || pretty(key), r: c?.r, urls: SPR.decor(key), emoji: EMOJI.decor };
+  }
+  const AS = { armed: 0, prevShop: new Set(), prevWeather: undefined, stock: new Map(), now: new Set(), weather: "", pets: [], busy: false };
+  async function alertTick() {
+    AL.enabled = readJson(ALERT_KEY)?.enabled !== false;
+    if (AL.enabled === false || AS.busy) return; AS.busy = true;
+    try {
+      const st = await readRoomState(), game = st?.child?.data || roomGame, me = await atomValue("myDataAtom"); if (!game) return; const now = Date.now();
+      const items = shopItems(game, me); AS.stock = items; const listed = new Set(); for (const [id, v] of items) if (AL.follow[id] && v.left > 0) listed.add(id);
+      AS.armed++; const ready = AS.armed >= 3 && items.size > 0;
+      if (ready) {
+        const fresh = [...listed].filter((id) => !AS.prevShop.has(id) || (AS.restockSeen && AS.restockSeen.get(id) !== items.get(id).restock));
+        if (fresh.length) { const m = shopMeta(fresh[0]); fire(`shop:${fresh[0]}`, fresh.length === 1 ? `${m.name} is in stock` : `${fresh.length} watched items are in stock`, fresh.length === 1 ? `${items.get(fresh[0]).left} available now` : fresh.map((id) => shopMeta(id).name).slice(0, 4).join(", "), { urls: m.urls, emoji: m.emoji }); for (const id of fresh) live.set(`shop:${id}`, { last: now }); }
+        else if (AL.repeat) for (const id of listed) { const l = live.get(`shop:${id}`) || { last: now }; live.set(`shop:${id}`, l); if (now - l.last >= AL.every * 1000) { l.last = now; playSound(); } }
+        for (const key of [...live.keys()]) if (key.startsWith("shop:") && !listed.has(key.slice(5))) live.delete(key);
+      }
+      AS.prevShop = listed; AS.restockSeen = new Map([...items].map(([id, v]) => [id, v.restock])); AS.now = listed;
+      const wx = typeof game.weather === "string" ? game.weather : ""; AS.weather = wx;
+      if (AS.prevWeather !== undefined && wx !== AS.prevWeather && wx && AL.weather[wx]) { const w = WEATHER_ALERTS.find((x) => x.id === wx); fire(`weather:${wx}`, `${w?.name || wx} has started`, "Time to line up your pets.", { urls: SPR.mut(w?.mut || "Wet"), emoji: w?.emoji }); }
+      AS.prevWeather = wx;
+      if (AL.hunger.on) {
+        const mine = await readMine(); AS.pets = mine?.active || [];
+        for (const p of AS.pets) { const key = `pet:${p.id}`, low = p.hungerPct < AL.hunger.pct && !AL.hunger.muted[p.id]; const l = live.get(key);
+          if (low && !l) { live.set(key, { last: now }); fire(key, `${p.name || KD.pets[p.species]?.n || p.species} is getting hungry`, `${Math.round(p.hungerPct)}% left, about ${hungerLeft(p)}`, { urls: petUrls(p), emoji: EMOJI.pet }); }
+          else if (low && AL.repeat && now - l.last >= AL.every * 1000) { l.last = now; playSound(); }
+          else if (!low && l) live.delete(key); }
+      }
+    } catch (error) { console.warn("[King's Mod] alerts", error); } finally { AS.busy = false; }
+  }
+  let alertTimer = null;
+  const startAlerts = () => { if (!alertTimer) alertTimer = setInterval(alertTick, 1500); };
+
+  function toggleRow(label, hint, on, onChange) {
+    const row = h("label", "kx-trow", `<span><b>${esc(label)}</b>${hint ? `<small>${esc(hint)}</small>` : ""}</span>`); const i = h("input"); i.type = "checkbox"; i.checked = !!on; i.onchange = () => onChange(i.checked); row.append(i); return row;
+  }
+  function alertsShops(body, win) {
+    const bar = h("div", "kx-filters"), search = h("input", "kx-search"); search.type = "search"; search.placeholder = "Find an item to watch"; search.setAttribute("aria-label", "Find an item");
+    let kind = "Seed"; const seg = segmented([{ label: "Seeds", value: "Seed" }, { label: "Eggs", value: "Egg" }, { label: "Tools", value: "Tool" }, { label: "Decor", value: "Decor" }], kind, (v) => { kind = v; paint(); });
+    const grid = h("div", "kx-watch"); bar.append(search, seg); body.append(bar, grid);
+    const catalogs = { Seed: Object.keys(KD.crops), Egg: Object.keys(KD.eggs), Tool: Object.keys(KD.tools), Decor: Object.keys(KD.decor) };
+    function paint() {
+      const t = search.value.trim().toLowerCase(); grid.replaceChildren(); let n = 0;
+      for (const key of catalogs[kind]) {
+        const id = `${kind}:${key}`, m = shopMeta(id); if (t && !m.name.toLowerCase().includes(t)) continue; n++;
+        const b = h("button", "kx-wt"); b.type = "button"; b.dataset.id = id; b.dataset.on = String(!!AL.follow[id]); b.style.setProperty("--rc", rarityColour(m.r));
+        b.append(spr(m.urls, 40, m.emoji), h("b", "", esc(m.name)), h("i", "kx-wt-bell", "🔔"), h("em", "kx-wt-st", ""));
+        b.onclick = () => { AL.follow[id] = !AL.follow[id]; if (!AL.follow[id]) delete AL.follow[id]; b.dataset.on = String(!!AL.follow[id]); saveAL(); };
+        grid.append(b);
+      }
+      if (!n) grid.append(empty("🔍", "Nothing matches", "Try another name."));
+      update();
+    }
+    function update() { let followed = Object.keys(AL.follow).length; for (const b of grid.querySelectorAll(".kx-wt")) { const v = AS.stock.get(b.dataset.id); b.dataset.stock = String(!!(v && v.left > 0)); b.querySelector(".kx-wt-st").textContent = v && v.left > 0 ? `${v.left} in shop` : ""; } win.setSub(`${followed} item${followed === 1 ? "" : "s"} watched`); }
+    search.oninput = paint; paint(); return { update };
+  }
+  function alertsWeather(body, win) {
+    const wrap = h("div", "kx-wx"); body.append(wrap); win.setSub("Hear about it the moment it starts");
+    for (const w of WEATHER_ALERTS) {
+      const b = h("button", "kx-wxt"); b.type = "button"; b.dataset.id = w.id; b.dataset.on = String(!!AL.weather[w.id]); b.append(spr(SPR.mut(w.mut), 44, w.emoji), h("b", "", esc(w.name)), h("em", "", "Watching"), h("small", "", "")); b.onclick = () => { AL.weather[w.id] = !AL.weather[w.id]; b.dataset.on = String(!!AL.weather[w.id]); saveAL(); }; wrap.append(b);
+    }
+    function update() { for (const b of wrap.children) { const here = AS.weather === b.dataset.id; b.dataset.now = String(here); b.querySelector("small").textContent = here ? "Happening now" : ""; } }
+    update(); return { update };
+  }
+  function alertsPets(body, win) {
+    const top = h("div", "kx-setcard"); const list = h("div", "kx-hl"); body.append(top, list); win.setSub("A nudge before your pets run empty");
+    top.append(toggleRow("Warn me when a pet is hungry", "Checks the pets that are out", AL.hunger.on, (v) => { AL.hunger.on = v; saveAL(); }));
+    const rng = h("div", "kx-trow"), r = h("input", "kx-range"), val = h("b"); r.type = "range"; r.min = 5; r.max = 90; r.step = 5; r.value = AL.hunger.pct; val.textContent = `${AL.hunger.pct}%`;
+    r.oninput = () => { AL.hunger.pct = Number(r.value); val.textContent = `${r.value}%`; saveAL(); }; rng.append(h("span", "", "<b>Warn below</b>"), r, val); top.append(rng);
+    function update() {
+      list.replaceChildren(); if (!AS.pets.length) { list.append(empty("🐾", "No pets out", "Hunger shows here once pets are in your garden.")); return; }
+      for (const p of AS.pets) { const row = h("label", "kx-hrow"); const cb = h("input"); cb.type = "checkbox"; cb.checked = !AL.hunger.muted[p.id]; cb.onchange = () => { if (cb.checked) delete AL.hunger.muted[p.id]; else AL.hunger.muted[p.id] = true; saveAL(); };
+        row.append(spr(petUrls(p), 38, EMOJI.pet), h("div", "", `<b>${esc(p.name || KD.pets[p.species]?.n || p.species)}</b><div class="kx-bar" data-w="${p.hungerPct < AL.hunger.pct ? 1 : 0}"><i style="width:${p.hungerPct}%"></i></div>`), h("em", "", `${Math.round(p.hungerPct)}%`), cb); list.append(row); }
+    }
+    update(); return { update };
+  }
+  function alertsSound(body, win) {
+    win.setSub("How alerts reach you"); const card = h("div", "kx-setcard");
+    card.append(toggleRow("Alerts on", "Master switch, also the light on the dock button", AL.enabled !== false, (v) => { AL.enabled = v; saveAL(); }), toggleRow("Pop-up messages", "Small cards at the top of the screen", AL.toasts, (v) => { AL.toasts = v; saveAL(); }), toggleRow("Keep reminding me", "Repeat the sound while an alert is still true", AL.repeat, (v) => { AL.repeat = v; saveAL(); }));
+    const snd = h("div", "kx-trow", `<span><b>Sound</b></span>`); snd.append(segmented(Object.entries(SOUNDS).map(([value, label]) => ({ value, label })), AL.sound, (v) => { AL.sound = v; saveAL(); playSound(v); }, "kx-seg-wrap"));
+    const vol = h("div", "kx-trow"), vr = h("input", "kx-range"), vv = h("b"); vr.type = "range"; vr.min = 0; vr.max = 100; vr.value = Math.round(AL.volume * 100); vv.textContent = `${vr.value}%`; vr.oninput = () => { AL.volume = Number(vr.value) / 100; vv.textContent = `${vr.value}%`; saveAL(); }; vr.onchange = () => playSound(); vol.append(h("span", "", "<b>Volume</b>"), vr, vv);
+    const rep = h("div", "kx-trow"), ri = h("input", "kx-range"), rv = h("b"); ri.type = "range"; ri.min = 5; ri.max = 120; ri.step = 5; ri.value = AL.every; rv.textContent = `${AL.every}s`; ri.oninput = () => { AL.every = Number(ri.value); rv.textContent = `${ri.value}s`; saveAL(); }; rep.append(h("span", "", "<b>Remind every</b>"), ri, rv);
+    const test = h("button", "kx-btn", "Send a test alert"); test.type = "button"; test.onclick = () => fire("test", "This is a test alert", "Sound and pop-up look like this.", { emoji: "🔔" });
+    card.append(snd, vol, rep, test); body.append(card);
+    const hist = h("div", "kx-hist"); body.append(hist);
+    function update() { hist.replaceChildren(h("h4", "", "Recent alerts")); if (!alertLog.length) { hist.append(h("p", "kx-muted", "Nothing has gone off yet.")); return; } for (const a of alertLog.slice(0, 8)) hist.append(h("div", "kx-hrow2", `<span>${a.emoji || "🔔"}</span><b>${esc(a.title)}</b><time>${new Date(a.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>`)); }
+    update(); return { update };
+  }
+  createWin({ id: "calc", title: "Crop Calculator", icon: "calc", accent: ["#f0c35a", "#f6e3a1"], w: 640, h: 600, tabs: [{ id: "c", label: "Crops", render: renderCalc }] });
+  createWin({ id: "alerts", title: "Alerts", icon: "bell", accent: ["#f6a04a", "#ffd59a"], w: 560, h: 580, every: 1000, tabs: [{ id: "shops", label: "Shop", render: alertsShops }, { id: "weather", label: "Weather", render: alertsWeather }, { id: "pets", label: "Pets", render: alertsPets }, { id: "sound", label: "Sound", render: alertsSound }] });
+
+  const CSS2 = `
+.kx-win{--ac:#f0c35a;--ac2:#f6e3a1;position:fixed;z-index:2147483630;display:none;flex-direction:column;min-width:300px;min-height:220px;overflow:hidden;border-radius:20px 20px 16px 16px;color:#e9f2ec;font:600 12.5px "Trebuchet MS",system-ui,sans-serif;background:radial-gradient(130% 40% at 15% 0%,color-mix(in srgb,var(--ac) 16%,transparent),transparent 70%),linear-gradient(170deg,#112619,#08140d);border:1px solid color-mix(in srgb,var(--ac) 38%,transparent);box-shadow:0 20px 56px rgba(0,0,0,.65)}
+.kx-win *{box-sizing:border-box}
+.kx-top{flex:none;display:flex;align-items:center;gap:10px;padding:10px 12px 8px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.kx-mark{flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:11px 11px 11px 4px;color:#10200f;background:linear-gradient(145deg,var(--ac),var(--ac2))}
+.kx-mark svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.kx-ttl{flex:1;min-width:0}.kx-ttl h2{margin:0;font:700 18px Georgia,"Palatino Linotype",serif;color:var(--ac2);letter-spacing:.01em;white-space:nowrap}
+.kx-sub{margin-top:1px;font-size:11px;color:#8db5a0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kx-tools{display:flex;gap:5px}.kx-x{flex:none;width:28px;height:28px;border-radius:9px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#d9e8de;font-size:16px;cursor:pointer}.kx-x:hover{color:var(--ac2);border-color:var(--ac)}
+.kx-tabs{flex:none;display:flex;gap:2px;padding:0 12px;border-bottom:1px solid rgba(255,255,255,.09);overflow-x:auto;scrollbar-width:none}
+.kx-tab{flex:none;padding:7px 13px 8px;margin-bottom:-1px;border:1px solid transparent;border-bottom:0;border-radius:10px 10px 0 0;background:none;color:#97b3a3;font:700 12.5px "Trebuchet MS",system-ui,sans-serif;cursor:pointer}
+.kx-tab:hover{color:#fff}.kx-tab[data-on="true"]{color:var(--ac2);background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.12);box-shadow:inset 0 2px 0 var(--ac)}
+.kx-body{flex:1;min-height:0;overflow:auto;padding:12px;scrollbar-width:thin;scrollbar-color:#2f6a49 transparent;container-type:inline-size}
+.kx-rh{position:absolute;top:56px;right:0;bottom:22px;width:7px;cursor:ew-resize;touch-action:none}.kx-rh.b{top:auto;left:0;right:22px;bottom:0;width:auto;height:7px;cursor:ns-resize}
+.kx-rg{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ac) 50% 58%,transparent 58% 70%,var(--ac) 70% 78%,transparent 78%);opacity:.8}
+.kx-spr{flex:none;display:inline-grid;place-items:center;width:var(--z);height:var(--z);font-size:calc(var(--z) * .68);line-height:1}.kx-spr img{max-width:100%;max-height:100%;object-fit:contain;image-rendering:auto;display:block}
+.kx-empty{display:grid;justify-items:center;gap:4px;padding:34px 12px;text-align:center;color:#8db5a0}.kx-empty-e{font-size:32px}.kx-empty b{color:#e9f2ec;font-size:13.5px}
+.kx-search{width:100%;padding:8px 11px;border-radius:11px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.28);color:#fff;font:600 12.5px "Trebuchet MS",system-ui,sans-serif;outline:none}.kx-search:focus{border-color:var(--ac)}
+.kx-btn{padding:7px 13px;border-radius:10px;border:1px solid var(--ac);background:linear-gradient(145deg,color-mix(in srgb,var(--ac) 30%,transparent),color-mix(in srgb,var(--ac) 12%,transparent));color:var(--ac2);font:700 12px "Trebuchet MS",system-ui,sans-serif;cursor:pointer;white-space:nowrap}.kx-btn:hover:not(:disabled){filter:brightness(1.25)}.kx-btn:disabled{opacity:.45;cursor:default}.kx-btn.ghost{border-color:rgba(255,255,255,.16);background:none;color:#a9bdb1}
+.kx-seg{display:flex;gap:3px;padding:3px;border-radius:12px;background:rgba(0,0,0,.3)}.kx-seg button{flex:1;padding:5px 9px;border:0;border-radius:9px;background:none;color:#a5beb0;font:700 11.5px "Trebuchet MS",system-ui,sans-serif;cursor:pointer;white-space:nowrap}.kx-seg button[data-on="true"]{background:var(--ac);color:#11200f}.kx-seg-wrap{flex-wrap:wrap}
+.kx-range{width:100%;accent-color:var(--ac)}
+.kx-bar{height:7px;border-radius:9px;background:rgba(0,0,0,.4);overflow:hidden}.kx-bar i{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,#f59e0b,#fde047)}.kx-bar.xp i{background:linear-gradient(90deg,#8b5cf6,#d8b4fe)}.kx-bar[data-w="1"] i{background:linear-gradient(90deg,#ef4444,#fb923c)}
+.kx-calc{display:grid;grid-template-columns:minmax(150px,210px) 1fr;gap:12px;align-items:start}
+@container (max-width:470px){.kx-calc{grid-template-columns:1fr}.kx-packets{max-height:170px}}
+.kx-shelf{display:grid;gap:8px;position:sticky;top:0}.kx-packets{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:6px;max-height:min(62vh,430px);overflow:auto;padding:2px;scrollbar-width:thin}
+.kx-packet{display:grid;justify-items:center;gap:3px;padding:7px 4px 6px;border:1px solid rgba(255,255,255,.1);border-top:3px solid var(--rc);border-radius:4px 4px 12px 12px;background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.02));color:#dce9e0;cursor:pointer;clip-path:polygon(0 8px,18% 0,36% 8px,54% 0,72% 8px,100% 0,100% 100%,0 100%)}
+.kx-packet:hover{background:rgba(255,255,255,.12)}.kx-packet[data-on="true"]{outline:2px solid var(--ac);outline-offset:-2px;background:color-mix(in srgb,var(--ac) 18%,transparent)}.kx-packet-n{font-size:10.5px;text-align:center;line-height:1.15;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kx-stall{display:grid;gap:11px;min-width:0}.kx-hero{display:flex;align-items:center;gap:14px;padding:12px;border-radius:18px;background:radial-gradient(90% 120% at 0% 50%,color-mix(in srgb,var(--rc) 22%,transparent),transparent),rgba(0,0,0,.22);border:1px solid color-mix(in srgb,var(--rc) 40%,transparent)}
+.kx-stage{flex:none;display:grid;place-items:center;width:116px;height:116px;border-radius:50%;background:radial-gradient(circle,rgba(255,255,255,.12),transparent 70%)}.kx-crop{transform-origin:center;transition:transform .15s ease}
+.kx-hero-r{min-width:0;display:grid;gap:3px}.kx-hero-n h3{margin:0;font:700 20px Georgia,serif;color:#fff}.kx-hero-n span{font-size:11px;color:#9fc0ae}
+.kx-price{display:flex;align-items:center;gap:7px;font:700 30px Georgia,serif;color:var(--ac2);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.kx-price i{font-style:normal;font-size:24px}.kx-weight{font-size:11.5px;color:#9fc0ae}
+.kx-break{display:flex;flex-wrap:wrap;gap:5px}.kx-break span{padding:3px 9px;border-radius:99px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.09);font-size:11px;color:#cfe0d5;font-variant-numeric:tabular-nums}
+.kx-sizerow{display:flex;align-items:center;gap:10px;color:#b9d0c1}.kx-size-v{min-width:42px;text-align:right;color:var(--ac2)}.kx-quick{display:flex;gap:4px}.kx-quick button{padding:3px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:none;color:#cfe0d5;font:700 11px "Trebuchet MS",system-ui,sans-serif;cursor:pointer}
+.kx-mgroup{display:grid;gap:5px}.kx-mgroup>span{font-size:11.5px;color:#9fc0ae}.kx-mrow{display:flex;flex-wrap:wrap;gap:5px}
+.kx-mchip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px 4px 6px;border-radius:99px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#d4e4d9;font:700 11.5px "Trebuchet MS",system-ui,sans-serif;cursor:pointer}.kx-mchip small{margin-left:4px;color:var(--ac);font-size:10.5px}.kx-mchip[data-on="true"]{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 20%,transparent);color:#fff}.kx-mchip-none{display:grid;place-items:center;width:20px;color:#7f9a8b}
+.kx-jack{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 12px;border-radius:14px;border:1px dashed color-mix(in srgb,var(--ac) 55%,transparent);color:#b9d0c1;font-size:11.5px}.kx-jack b{color:var(--ac2);font:700 16px Georgia,serif;white-space:nowrap}
+.kx-pcs,.kx-teams,.kx-log{display:grid;gap:10px}
+.kx-pc{display:flex;gap:12px;padding:11px;border-radius:16px;background:linear-gradient(135deg,rgba(255,255,255,.07),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.1);border-left:4px solid var(--rc)}
+.kx-pc-f{flex:none;display:grid;place-items:center;width:88px;height:96px;border-radius:14px 14px 30px 14px;background:radial-gradient(circle at 50% 35%,color-mix(in srgb,var(--rc) 35%,transparent),rgba(0,0,0,.3))}
+.kx-pc-m{flex:1;min-width:0;display:grid;gap:6px;align-content:start}.kx-pc-t{font:700 15px Georgia,serif;color:#fff}.kx-pc-t small{margin-left:7px;font:600 11px "Trebuchet MS",sans-serif;color:#9fc0ae}
+.kx-str{position:relative;height:18px;border-radius:9px;background:rgba(0,0,0,.4);overflow:hidden}.kx-str span{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,color-mix(in srgb,var(--rc) 70%,#000),var(--rc))}.kx-str b{position:relative;display:block;padding:0 9px;line-height:18px;font-size:11px;color:#fff;text-shadow:0 1px 2px #000}.kx-str i{font-style:normal;opacity:.7}
+.kx-bars{display:grid;grid-template-columns:1fr 1fr;gap:8px}@container (max-width:430px){.kx-bars{grid-template-columns:1fr}}.kx-bars label{display:grid;gap:2px;font-size:10.5px;color:#9fc0ae}.kx-bars em{font-style:normal;color:#cfe0d5}
+.kx-abs{display:flex;flex-wrap:wrap;gap:4px}.kx-ab{padding:2px 8px;border-radius:99px;font-size:10.5px;color:#10200f;background:var(--t);font-weight:700}.kx-ab b{margin-left:3px}.kx-mb{padding:2px 8px;border-radius:99px;font-size:10.5px;color:#10200f;font-weight:700;background:linear-gradient(90deg,#fde047,#f0abfc)}.kx-pc-v{font-size:11.5px;color:var(--ac2)}
+.kx-pc.sm{flex-direction:column;align-items:center;text-align:center;gap:6px;padding:9px 7px;border-left-width:1px;border-top:3px solid var(--rc);position:relative}.kx-pc.sm .kx-pc-f{width:68px;height:68px}.kx-pc.sm .kx-pc-t{font-size:12px}.kx-pc.sm .kx-pc-t small{display:block;margin:0}.kx-pc.sm .kx-pc-m{width:100%}.kx-pc-w{font-size:10px;color:#8db5a0}
+.kx-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}.kx-filters{display:grid;gap:7px;margin-bottom:10px}
+.kx-saverow{display:flex;gap:8px;margin-bottom:10px}.kx-team{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:14px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04)}.kx-team[data-on="true"]{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 14%,transparent)}
+.kx-faces{display:flex;gap:-6px}.kx-face{border-radius:50%;background:rgba(0,0,0,.35);padding:3px;margin-right:-10px;border:2px solid #0e2116}.kx-face-x{display:grid;place-items:center;width:44px;height:44px;border-radius:50%;background:rgba(0,0,0,.35);color:#7f9a8b;margin-right:-10px}
+.kx-team-i{flex:1;min-width:0;margin-left:14px;display:grid;gap:2px}.kx-team-i b{font:700 14px Georgia,serif;color:#fff}.kx-team-i span{font-size:11px;color:#9fc0ae}
+.kx-logchips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}.kx-logrow{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:12px;background:rgba(255,255,255,.04)}.kx-logrow>div{flex:1;min-width:0;display:grid}.kx-logrow span{font-size:11px;color:#9fc0ae;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.kx-logrow time{font-size:10.5px;color:#7f9a8b}
+.kx-roomb{display:grid;grid-template-columns:minmax(120px,170px) 1fr;gap:12px;align-items:start}@container (max-width:470px){.kx-roomb{grid-template-columns:1fr}.kx-guests{flex-direction:row!important;overflow-x:auto}}
+.kx-guests{display:flex;flex-direction:column;gap:5px}.kx-gb{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04);color:#dce9e0;text-align:left;cursor:pointer;min-width:0;flex:none}.kx-gb[data-on="true"]{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 16%,transparent)}.kx-gb span{display:grid;min-width:0}.kx-gb b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px}.kx-gb small{color:#8db5a0}
+.kx-av{position:relative;flex:none;display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#254a35 center/cover;font:700 14px Georgia,serif;color:#e8f6ec}.kx-av.big{width:56px;height:56px;font-size:22px}.kx-av i{position:absolute;right:-1px;bottom:-1px;width:10px;height:10px;border-radius:50%;background:#52605a;border:2px solid #0e2116}.kx-av i.on{background:#4ade80}
+.kx-guest{display:grid;gap:10px;min-width:0}.kx-ghead{display:flex;align-items:center;gap:12px}.kx-gname{flex:1;min-width:0}.kx-gname h3{margin:0;font:700 19px Georgia,serif;color:#fff;overflow:hidden;text-overflow:ellipsis}.kx-gname span{font-size:11px;color:#9fc0ae}
+.kx-vals{display:grid;grid-template-columns:1fr 1fr;gap:8px}.kx-vals div{display:grid;gap:2px;padding:9px 12px;border-radius:14px;background:rgba(0,0,0,.25);border:1px solid rgba(255,255,255,.08)}.kx-vals span{font-size:11px;color:#9fc0ae}.kx-vals b{font:700 18px Georgia,serif;color:var(--ac2)}
+.kx-it{display:grid;justify-items:center;gap:2px;padding:8px 4px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);text-align:center}.kx-it b{font-size:10.5px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kx-it span{font-size:10.5px;color:#9fc0ae}
+.kx-jr h4,.kx-hist h4{margin:12px 0 6px;font:700 14px Georgia,serif;color:var(--ac2)}.kx-stats{display:grid;gap:4px}.kx-stats div{display:flex;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:10px;background:rgba(255,255,255,.04)}.kx-stats span{color:#b9d0c1}.kx-stats b{color:var(--ac2);font-variant-numeric:tabular-nums}
+.kx-watch{display:grid;grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:8px}.kx-wt{position:relative;display:grid;justify-items:center;gap:3px;padding:10px 6px 8px;border-radius:14px;border:1px solid rgba(255,255,255,.1);border-bottom:3px solid var(--rc);background:rgba(255,255,255,.04);color:#dce9e0;cursor:pointer}.kx-wt b{font-size:10.5px;text-align:center;line-height:1.15}.kx-wt-bell{position:absolute;top:5px;right:6px;font-style:normal;font-size:13px;filter:grayscale(1);opacity:.35}.kx-wt[data-on="true"]{background:color-mix(in srgb,var(--ac) 18%,transparent);border-color:var(--ac)}.kx-wt[data-on="true"] .kx-wt-bell{filter:none;opacity:1}.kx-wt-st{font-style:normal;font-size:10px;color:#4ade80;min-height:12px}
+.kx-wx{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.kx-wxt{display:grid;justify-items:center;gap:3px;padding:14px 8px;border-radius:18px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#e4efe8;cursor:pointer}.kx-wxt b{font:700 14px Georgia,serif}.kx-wxt em{font-style:normal;font-size:11px;color:#7f9a8b}.kx-wxt[data-on="true"]{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 16%,transparent)}.kx-wxt[data-on="true"] em{color:var(--ac2)}.kx-wxt small{min-height:13px;color:#4ade80;font-size:11px}.kx-wxt[data-now="true"]{box-shadow:0 0 0 2px #4ade80 inset}
+.kx-setcard{display:grid;gap:4px;padding:10px 12px;border-radius:16px;background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.08);margin-bottom:10px}.kx-trow{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:34px;cursor:pointer}.kx-trow>span{display:grid;flex:0 0 auto}.kx-trow small{color:#8db5a0;font-weight:600}.kx-trow input[type=checkbox]{width:18px;height:18px;accent-color:var(--ac)}.kx-trow .kx-range{flex:1}.kx-trow>b{min-width:40px;text-align:right;color:var(--ac2)}.kx-setcard .kx-btn{justify-self:start;margin-top:6px}
+.kx-hrow{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:12px;background:rgba(255,255,255,.04);margin-bottom:6px}.kx-hrow>div{flex:1;display:grid;gap:4px}.kx-hrow em{font-style:normal;color:#cfe0d5;min-width:36px;text-align:right}.kx-hrow input{accent-color:var(--ac)}
+.kx-hrow2{display:flex;align-items:center;gap:8px;padding:5px 2px;border-bottom:1px solid rgba(255,255,255,.06)}.kx-hrow2 b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kx-hrow2 time{color:#7f9a8b;font-size:10.5px}.kx-muted{color:#7f9a8b;margin:0}
+.kx-toasts{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;display:grid;gap:7px;width:min(360px,calc(100vw - 20px));pointer-events:none}
+.kx-toast{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:9px 10px 9px 12px;border-radius:16px;border:1px solid rgba(240,195,90,.5);background:linear-gradient(135deg,rgba(28,38,30,.98),rgba(14,24,17,.98));box-shadow:0 12px 30px rgba(0,0,0,.55);color:#eef6f0;font:600 12px "Trebuchet MS",system-ui,sans-serif;animation:kx-in .22s ease-out}.kx-toast[data-out]{opacity:0;transform:translateY(-8px);transition:.18s}.kx-toast[data-kind="warn"]{border-color:#f87171}
+.kx-toast-ic{flex:none;display:grid;place-items:center;width:38px;height:38px;border-radius:12px;background:rgba(255,255,255,.07);font-size:20px}.kx-toast-tx{flex:1;min-width:0;display:grid;gap:1px}.kx-toast-tx b{font:700 13px Georgia,serif;color:#fde68a}.kx-toast-tx span{color:#a9c4b4}.kx-toast-x{border:0;background:none;color:#a9c4b4;font-size:17px;cursor:pointer}
+@keyframes kx-in{from{opacity:0;transform:translateY(-10px)}}
+@media (prefers-reduced-motion:reduce){.kx-toast,.kx-crop{animation:none;transition:none}}
+#${DOCK_ID} .gd-btn[data-win-on="true"]{border-color:rgba(253,224,71,.7);background:rgba(253,224,71,.16);color:#fde047}`;
+
   // ---------- dock ----------
   let dock = null, grid = null, pop = null, miniLamps = null; const lamps = [];
   // ---------- update check ----------
@@ -462,6 +1269,7 @@
   function fireShortcut(code) { const key = code.slice(3).toLowerCase(); for (const type of ["keydown", "keyup"]) document.dispatchEvent(new KeyboardEvent(type, { key, code, altKey: true, bubbles: true, cancelable: true })); }
   function refreshActive() {
     if (!grid) return; const a = grid.querySelector('[data-id="almanac"]'), w = grid.querySelector('[data-id="weather"]');
+    for (const it of ITEMS) if (it.win) { const b = grid.querySelector(`[data-id="${it.id}"]`); if (b) b.dataset.active = String(!!WINS[it.win]?.isOpen()); }
     if (a) a.dataset.active = String(almanac?.style.display === "block"); if (w) w.dataset.active = String(cfg.weather);
   }
   function buildButtons() {
@@ -471,7 +1279,7 @@
       const button = document.createElement("button"); button.type = "button"; button.className = "gd-btn"; button.dataset.id = item.id;
       button.title = item.title + (item.lamp ? "\nRight-click: turn on / off" : ""); button.setAttribute("aria-label", item.label);
       button.innerHTML = `<span class="gd-icon">${iconSvg(item.icon)}</span><span class="gd-label">${esc(item.label)}</span>`;
-      button.onclick = () => { if (item.overview) toggleAlmanac(); else if (item.weather) { cfg.weather = !cfg.weather; saveCfg(); applyCfg(); } else fireShortcut(item.code); };
+      button.onclick = () => { if (item.win) WINS[item.win]?.toggle(); else if (item.overview) toggleAlmanac(); else if (item.weather) { cfg.weather = !cfg.weather; saveCfg(); applyCfg(); } else fireShortcut(item.code); };
       if (item.lamp) {
         const dot = document.createElement("span"); dot.className = "gd-dot"; dot.dataset.on = String(lampOn(item.lamp)); button.append(dot); lamps.push([item.lamp, dot]);
         const tiny = document.createElement("span"); tiny.className = "gd-dot"; tiny.title = item.label; tiny.dataset.on = dot.dataset.on; miniLamps.append(tiny); lamps.push([item.lamp, tiny]);
@@ -542,7 +1350,7 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
       else if (t.hasAttribute("data-reset-pos")) {
         for (const key of [POSITION_KEY, OLD_POSITION_KEY, ALMANAC_RECT_KEY, WEATHER_POS_KEY]) { try { localStorage.removeItem(key); } catch {} }
         dock.style.left = ""; dock.style.transform = ""; dock.style.right = "12px"; dock.style.top = "90px";
-        if (weatherEl) { weatherEl.style.left = ""; placeWeather(); } if (almanac?.style.display === "block") placeSheet(defaultRect()); placePop();
+        if (weatherEl) { weatherEl.style.left = ""; placeWeather(); } if (almanac?.style.display === "block") placeSheet(defaultRect()); for (const w of Object.values(WINS)) w.reset(); placePop();
       } else if (t.hasAttribute("data-reset-all")) { Object.assign(cfg, DEFAULTS, { hidden: {} }); saveCfg(); buildButtons(); applyCfg(); }
     });
     document.addEventListener("pointerdown", (event) => { if (pop.dataset.open === "true" && !dock.contains(event.target)) pop.dataset.open = "false"; }, true);
@@ -550,14 +1358,14 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
     setInterval(() => { for (const [key, dot] of lamps) dot.dataset.on = String(lampOn(key)); const t = dock.querySelector(".gd-title"); if (_fnv(TITLE) !== 1311861492 || (t && t.textContent !== TITLE)) { if (t) t.textContent = atob("S2luZydzIE1vZA=="); } }, 1500);
   }
   function install() {
-    installDock();
+    installDock(); mountWins(); startAlerts(); void loadLiveData();
     if (!hookRoom()) { const t = setInterval(() => { if (hookRoom()) clearInterval(t); }, 1000); }
     document.addEventListener("keydown", (event) => {
       const target = event.target; if (target?.isContentEditable || /^(input|textarea|select)$/i.test(target?.tagName || "")) return;
-      if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || event.code !== "KeyO") return;
-      event.preventDefault(); event.stopPropagation(); toggleAlmanac();
+      if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || !/^Key[OCDRN]$/.test(event.code)) return;
+      event.preventDefault(); event.stopPropagation(); if (event.code === "KeyO") toggleAlmanac(); else WINS[{ KeyC: "calc", KeyD: "pets", KeyR: "room", KeyN: "alerts" }[event.code]]?.toggle();
     }, true);
-    document.addEventListener("keydown", (event) => { if (event.key === "Escape" && almanac?.style.display === "block") closeAlmanac(); }, true);
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") { const open = Object.values(WINS).filter((w) => w.isOpen()).sort((a, b) => Number(b.root.style.zIndex) - Number(a.root.style.zIndex))[0]; if (open) open.closeWin(); else if (almanac?.style.display === "block") closeAlmanac(); } }, true);
   }
   if (document.body) install(); else document.addEventListener("DOMContentLoaded", install, { once: true });
 })();
