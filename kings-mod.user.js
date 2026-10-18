@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.2.0
+// @version      3.2.1
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -473,7 +473,7 @@
   function fmtClock(ms) { const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return h ? `${h}:${pad2(m)}:${pad2(x)}` : `${m}:${pad2(x)}`; }
   function weatherInfo(now) {
     const game = roomGame || PW.__gardenCompanionState?.game || null, cur = typeof game?.weather === "string" ? game.weather : "";
-    if (game && cur !== seenWeather) { seenAt = seenWeather === undefined ? 0 : now; seenWeather = cur; }
+    if (game && cur !== seenWeather) { { const edge = Math.floor(now / SLOT_MS) * SLOT_MS; seenAt = seenWeather === undefined ? 0 : (now - edge < 20000 ? edge : now); } seenWeather = cur; }
     const list = Array.isArray(game?.weatherForecast) ? game.weatherForecast : []; let endsIn = null, next = null;
     for (const e of list) {
       const id = typeof e?.weatherId === "string" ? e.weatherId : "", s = Number(e?.startsAtMs), en = Number(e?.endsAtMs); if (!Number.isFinite(s)) continue;
@@ -1612,5 +1612,547 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
     }, true);
     document.addEventListener("keydown", (event) => { if (event.key === "Escape") { const open = Object.values(WINS).filter((w) => w.isOpen()).sort((a, b) => Number(b.root.style.zIndex) - Number(a.root.style.zIndex))[0]; if (open) open.closeWin(); else if (almanac?.style.display === "block") closeAlmanac(); } }, true);
   }
+  // =====================================================================================================
+  //  Misc, ported from Arie's mod: Display (crop price, garden view), Movement (ghost mode), Inventory
+  //  (keep a slot free, auto-store), Seed / Decor deleters and Auto reconnect.
+  //  This block is self-contained: it only uses helpers defined above and does not change any existing code.
+  // =====================================================================================================
+  const MISC_KEY = "mg-king-misc-v1", MISC_STYLE_ID = "mg-king-misc-style", PRICE_ID = "mg-king-crop-price", PRICE_POS_KEY = "mg-king-crop-price-pos-v1";
+  const MISC = Object.assign({ cropPrice: true, ghost: false, ghostDelay: 50, keepSlot: false, autoSilo: false, autoDecor: false, autoTool: false, collapsed: {} }, readJson(MISC_KEY) || {});
+  MISC.cropPrice = MISC.cropPrice !== false;
+  for (const k of ["ghost", "keepSlot", "autoSilo", "autoDecor", "autoTool"]) MISC[k] = MISC[k] === true;
+  MISC.ghostDelay = clamp(Math.floor(Number(MISC.ghostDelay)) || 50, 10, 1000);
+  if (!MISC.collapsed || typeof MISC.collapsed !== "object") MISC.collapsed = {};
+  const saveMisc = () => writeJson(MISC_KEY, MISC);
+  const miscStr = (v) => (typeof v === "string" ? v.trim() : "");
+  const miscQty = (v) => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? n : 0; };
+
+  // Waits for a game atom by its label, then follows it: `cb` gets the value now and again on every change.
+  async function followAtom(label, cb, keepGoing = () => true) {
+    let s = null;
+    for (let i = 0; i < 60 && keepGoing(); i++) { s = await getStore(); if (s) break; await sleep(1000); }
+    if (!s || !keepGoing()) return null;
+    let atom = null;
+    for (let i = 0; i < 1200 && keepGoing(); i++) { atom = findAtom(label); if (atom) break; await sleep(500); }
+    if (!atom || !keepGoing()) return null;
+    const push = async () => { try { const v = await readAtom(s, atom); if (keepGoing()) cb(v); } catch {} };
+    let off = null; try { off = s.sub(atom, push); } catch {}
+    await push();
+    return () => { try { off?.(); } catch {} };
+  }
+
+  // ---------- Movement: ghost mode (walk through anything, one tile per step) ----------
+  const GHOST = (() => {
+    const UP = ["z", "w", "arrowup"], DOWN = ["s", "arrowdown"], LEFT = ["q", "a", "arrowleft"], RIGHT = ["d", "arrowright"];
+    const KEYS = new Set([...UP, ...DOWN, ...LEFT, ...RIGHT]), held = new Set();
+    let raf = null, last = 0, budget = 0, stepping = false, posAtom = null;
+    const keyOf = (e) => String(e.key || "").toLowerCase();
+    const typing = (e) => { const t = e.target; return !!t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName || "")); };
+    // Alt / Ctrl / Meta combos and typing in a text box are left alone, so King's shortcuts and chat keep working.
+    const onDown = (e) => { const k = keyOf(e); if (!KEYS.has(k) || e.altKey || e.ctrlKey || e.metaKey || typing(e)) return; e.preventDefault(); e.stopImmediatePropagation(); if (!e.repeat) held.add(k); };
+    const onUp = (e) => { const k = keyOf(e); if (!KEYS.has(k) || !held.has(k)) return; e.preventDefault(); e.stopImmediatePropagation(); held.delete(k); };
+    const clearHeld = () => held.clear(), onVis = () => { if (document.hidden) held.clear(); };
+    const any = (keys) => keys.some((k) => held.has(k));
+    async function step(dx, dy) {
+      const s = await getStore(); if (!s) return;
+      posAtom = posAtom || findAtom("positionAtom"); if (!posAtom) return;
+      let cur = null; try { cur = await readAtom(s, posAtom); } catch {}
+      if (!cur || !Number.isFinite(Number(cur.x)) || !Number.isFinite(Number(cur.y))) return;   // never guess a position
+      const x = Math.round(Number(cur.x)) + dx, y = Math.round(Number(cur.y)) + dy;
+      try { await s.set(posAtom, { x, y }); } catch {}
+      sendGame({ type: "PlayerPosition", position: { x, y } });
+    }
+    function frame(ts) {
+      if (!last) last = ts; budget += ts - last; last = ts;
+      const dx = (any(RIGHT) ? 1 : 0) - (any(LEFT) ? 1 : 0), dy = (any(DOWN) ? 1 : 0) - (any(UP) ? 1 : 0), delay = MISC.ghostDelay;
+      if ((dx || dy) && budget >= delay && !stepping) { budget -= delay; stepping = true; step(dx, dy).finally(() => { stepping = false; }); }
+      budget = Math.min(budget, delay * 4); raf = requestAnimationFrame(frame);
+    }
+    return {
+      start() { if (raf !== null) return; last = 0; budget = 0; stepping = false; window.addEventListener("keydown", onDown, true); window.addEventListener("keyup", onUp, true); window.addEventListener("blur", clearHeld); document.addEventListener("visibilitychange", onVis); raf = requestAnimationFrame(frame); },
+      stop() { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } held.clear(); window.removeEventListener("keydown", onDown, true); window.removeEventListener("keyup", onUp, true); window.removeEventListener("blur", clearHeld); document.removeEventListener("visibilitychange", onVis); }
+    };
+  })();
+  function setGhost(on) { MISC.ghost = !!on; saveMisc(); if (on) GHOST.start(); else GHOST.stop(); }
+
+  // ---------- Inventory: keep one slot free ----------
+  const invItemsOf = (raw) => (Array.isArray(raw) ? raw : Array.isArray(raw?.items) ? raw.items : Array.isArray(raw?.inventory) ? raw.inventory : Array.isArray(raw?.inventory?.items) ? raw.inventory.items : []);
+  const INV = { count: 0, owned: { seed: new Set(), decor: new Set(), egg: new Set(), tool: new Set() } }, INV_BLOCK_AT = 99;
+  function refreshInv(raw) {
+    const items = invItemsOf(raw); INV.count = items.length; for (const set of Object.values(INV.owned)) set.clear();
+    for (const entry of items) {
+      if (!entry || typeof entry !== "object") continue;
+      const src = entry.item && typeof entry.item === "object" ? entry.item : entry, type = String(src.itemType ?? src.data?.itemType ?? "").toLowerCase();
+      if (type === "seed" && src.species) INV.owned.seed.add(String(src.species));
+      if (type === "decor" && src.decorId) INV.owned.decor.add(String(src.decorId));
+      if (type === "egg" && src.eggId) INV.owned.egg.add(String(src.eggId));
+      if (type === "tool" && src.toolId) INV.owned.tool.add(String(src.toolId));
+    }
+  }
+  const invFull = () => MISC.keepSlot && INV.count >= INV_BLOCK_AT;
+  function purchaseTarget(cmd) {
+    const item = cmd?.item ?? {};
+    switch (cmd?.shop) {
+      case "seed": return { kind: "seed", id: item.species ?? cmd?.species ?? cmd?.id };
+      case "egg": return { kind: "egg", id: item.eggId ?? cmd?.eggId ?? cmd?.id };
+      case "tool": return { kind: "tool", id: item.toolId ?? cmd?.toolId ?? cmd?.id };
+      case "decor": return { kind: "decor", id: item.decorId ?? cmd?.decorId ?? cmd?.id };
+      default: return null;
+    }
+  }
+  // Refuses anything that would need a new slot once the bag is at 99 of 100 (buying more of an item you already hold is fine).
+  function invBlocks(cmd) {
+    if (!invFull()) return false;
+    if (cmd.type === "HarvestCrop" || cmd.type === "PickupObject" || cmd.type === "HatchEgg") return true;
+    if (cmd.type === "PurchaseShopItem") { const t = purchaseTarget(cmd); if (!t) return false; const key = t.id == null ? "" : String(t.id); return !(key && INV.owned[t.kind].has(key)); }
+    return false;
+  }
+  function installMiscSendGuard() {
+    try {
+      const proto = PW.WebSocket?.prototype; if (!proto || proto.__kxMiscGuard) return;
+      const prev = proto.send;
+      proto.send = function (data, ...rest) {
+        try {
+          if (MISC.keepSlot && typeof data === "string" && data.indexOf('"QuinoaCommand"') !== -1) {
+            const parsed = JSON.parse(data), cmd = parsed?.type === "QuinoaCommand" ? parsed.command : null;
+            if (cmd && typeof cmd === "object" && !(typeof parsed.requestId === "string" && WS.own.has(parsed.requestId)) && invBlocks(cmd)) { console.log(`[King's Mod] ${cmd.type} blocked: keeping one inventory slot free`); return; }
+          }
+        } catch {}
+        return prev.call(this, data, ...rest);
+      };
+      proto.__kxMiscGuard = true;
+    } catch (error) { console.warn("[King's Mod] misc send guard failed", error); }
+  }
+
+  // ---------- Inventory: auto-store (new items go straight to a silo / shed / shack that already holds that kind) ----------
+  function makeAutoStore(flag, o) {
+    let on = MISC[flag], stored = new Set(), invQty = new Map(), offs = [], gen = 0, busy = false, starting = false, timer = null;
+    const queue = new Set(), pending = new Set(), removedAt = new Map();
+    const qtyMap = (raw) => { const m = new Map(); for (const it of Array.isArray(raw) ? raw : []) { const k = o.keyOf(it), q = miscQty(it?.quantity); if (k && q > 0) m.set(k, (m.get(k) || 0) + q); } return m; };
+    async function flush() {
+      if (busy || !on) return; busy = true;
+      try {
+        while (queue.size && on) {
+          const batch = [...queue]; queue.clear();
+          for (const key of batch) { if (!on) return; if (!stored.has(key)) continue; sendGame({ type: "MoveItem", from: "inventory", to: o.storageId, itemId: key }); await sleep(40); }
+        }
+      } finally { busy = false; }
+    }
+    function later(keys) {
+      for (const k of keys) if (k) pending.add(k);
+      if (!pending.size || timer != null) return;
+      timer = setTimeout(() => {
+        timer = null; const now = Date.now(), list = [...pending]; pending.clear();
+        for (const [k, t] of removedAt) if (now - t > 8000) removedAt.delete(k);
+        const fresh = list.filter((k) => !(removedAt.has(k) && now - removedAt.get(k) <= 2000));   // just taken out of storage on purpose: leave it
+        if (fresh.length) { for (const k of fresh) queue.add(k); void flush(); }
+      }, 800);
+    }
+    async function start() {
+      if (offs.length || starting) return; starting = true;
+      const g = ++gen, live = () => on && gen === g;
+      try {
+        const offStore = await followAtom(o.storageLabel, (raw) => { const prev = stored; stored = new Set(qtyMap(raw).keys()); for (const k of prev) if (!stored.has(k)) removedAt.set(k, Date.now()); }, live);
+        if (!live()) { offStore?.(); return; }
+        let first = true;
+        const offInv = await followAtom(o.invLabel, (raw) => {
+          if (!Array.isArray(raw)) return;   // not loaded yet
+          const next = qtyMap(raw);
+          if (first) { first = false; invQty = next; const both = [...next.keys()].filter((k) => stored.has(k)); if (both.length) { for (const k of both) queue.add(k); void flush(); } return; }
+          const up = []; for (const [k, q] of next) if (q > (invQty.get(k) || 0)) up.push(k);
+          invQty = next; if (up.length) later(up);
+        }, live);
+        if (!live()) { offStore?.(); offInv?.(); return; }
+        offs.push(offStore, offInv);
+      } finally { starting = false; }
+    }
+    function stop() {
+      gen++; for (const f of offs.splice(0)) { try { f?.(); } catch {} }
+      queue.clear(); pending.clear(); removedAt.clear(); stored = new Set(); invQty = new Map(); busy = false;
+      if (timer != null) { clearTimeout(timer); timer = null; }
+    }
+    return { isOn: () => on, set(v) { on = !!v; MISC[flag] = on; saveMisc(); if (on) void start(); else stop(); }, boot() { if (on) void start(); } };
+  }
+  const AUTO_STORE = {
+    silo: makeAutoStore("autoSilo", { storageId: "SeedSilo", storageLabel: "mySeedSiloItemsAtom", invLabel: "mySeedInventoryAtom", keyOf: (it) => miscStr(it?.species) }),
+    decor: makeAutoStore("autoDecor", { storageId: "DecorShed", storageLabel: "myDecorShedItemsAtom", invLabel: "myDecorInventoryAtom", keyOf: (it) => miscStr(it?.decorId) }),
+    tool: makeAutoStore("autoTool", { storageId: "ToolShack", storageLabel: "myToolShackItemsAtom", invLabel: "myToolInventoryAtom", keyOf: (it) => (it && typeof it === "object" && "remainingActiveSeconds" in it ? "" : miscStr(it?.toolId)) })
+  };
+
+  // ---------- Seed + Decor deleters ----------
+  const miscTally = (items, key) => { const m = new Map(); for (const it of Array.isArray(items) ? items : []) { const id = miscStr(it?.[key]), q = miscQty(it?.quantity); if (id && q > 0) m.set(id, (m.get(id) || 0) + q); } return m; };
+  async function loadEntries(invLabel, stoLabel, key, label) {
+    const [inv, sto] = await Promise.all([atomValue(invLabel), atomValue(stoLabel)]), a = miscTally(inv, key), b = miscTally(sto, key), out = [];
+    for (const id of new Set([...a.keys(), ...b.keys()])) { const invQty = a.get(id) || 0, storeQty = b.get(id) || 0; if (invQty + storeQty > 0) out.push({ id, label: label(id), invQty, storeQty, total: invQty + storeQty }); }
+    return out.sort((x, y) => x.label.localeCompare(y.label));
+  }
+  const seedEntries = () => loadEntries("mySeedInventoryAtom", "mySeedSiloItemsAtom", "species", (id) => KD.crops[id]?.sn || `${cropName(id)} Seed`);
+  const decorEntries = () => loadEntries("myDecorInventoryAtom", "myDecorShedItemsAtom", "decorId", (id) => KD.decor[id]?.n || pretty(id));
+  const invCountNow = async () => invItemsOf(await atomValue("myInventoryAtom")).length;
+  async function firstEmptyGardenSlot() {
+    const garden = (await atomValue("myDataAtom"))?.garden; if (!garden) return null;
+    const free = (objs, i) => objs?.[String(i)] == null;
+    for (let i = 0; i < 200; i++) if (free(garden.tileObjects, i)) return { tileType: "Dirt", index: i };
+    for (let i = 0; i < 76; i++) if (free(garden.boardwalkTileObjects, i)) return { tileType: "Boardwalk", index: i };
+    return null;
+  }
+  const mustSend = (payload) => { if (!sendGame(payload)) throw new Error("Not connected to the game."); };
+  const delToast = (title, msg, kind) => toast(title, msg, { kind: kind === "error" ? "warn" : "info", emoji: kind === "success" ? "✅" : kind === "error" ? "⚠️" : "🗑️" });
+  function makeDeleter(kind) {
+    const selection = new Map(), listeners = new Set(); let running = false, paused = false, cancelled = false, waiter = null;
+    const emit = (e) => { for (const f of [...listeners]) { try { f(e); } catch {} } };
+    const gate = async () => { while (paused && !cancelled) { await new Promise((r) => { waiter = r; }); waiter = null; } if (cancelled) throw new Error("cancelled"); };
+    const limit = () => (MISC.keepSlot ? INV_BLOCK_AT : 100);
+    const plan = (entry, want) => { const w = Math.max(0, Math.min(Math.floor(want || 0), entry.total)), fromInventory = Math.min(w, entry.invQty), fromStorage = w - fromInventory; return { fromInventory, fromStorage, newEntry: fromStorage > 0 && entry.invQty <= 0 }; };
+    const roomFor = async (p) => (p.fromStorage <= 0 || !p.newEntry ? true : (await invCountNow()) < limit());
+    async function run(delayMs) {
+      if (running) { delToast(kind.title, "Deletion already in progress.", "info"); return; }
+      if (!selection.size) { delToast(kind.title, `No ${kind.unit} selected.`, "info"); return; }
+      const byId = new Map((await kind.load()).map((e) => [e.id, e])), tasks = [];
+      for (const picked of selection.values()) { const entry = byId.get(picked.id); if (!entry) continue; const qty = Math.min(Math.max(0, Math.floor(picked.qty)), entry.total); if (qty > 0) tasks.push({ entry, qty }); }
+      const total = tasks.reduce((sum, t) => sum + t.qty, 0);
+      if (total <= 0) { delToast(kind.title, "Nothing left to delete.", "info"); return; }
+      const firstDraw = tasks.map((t) => plan(t.entry, t.qty)).find((p) => p.fromStorage > 0);
+      if (firstDraw && !(await roomFor(firstDraw))) { delToast(kind.title, "Your inventory is full. Free one slot and try again.", "error"); return; }
+      running = true; paused = false; cancelled = false; let done = 0;
+      try {
+        delToast(kind.title, `Deleting ${fmtInt(total)} ${kind.unit} across ${tasks.length} categories...`, "info");
+        for (const task of tasks) {
+          await gate(); const p = plan(task.entry, task.qty);
+          if (p.fromStorage > 0) {
+            if (!(await roomFor(p))) { delToast(kind.title, `Stopped at ${task.entry.label}, your inventory filled up.`, "error"); break; }
+            mustSend({ type: "MoveItem", from: kind.storageId, to: "inventory", itemId: task.entry.id, quantity: p.fromStorage }); await sleep(180);
+          }
+          for (let i = 0; i < task.qty; i++) {
+            await gate(); await kind.deleteOne(task.entry.id, delayMs); done++;
+            emit({ type: "progress", done, total, label: task.entry.label });
+            if (delayMs > 0 && i < task.qty - 1) await sleep(delayMs);
+          }
+        }
+        selection.clear();
+        delToast(kind.title, done > 0 ? `Deleted ${fmtInt(done)} ${kind.unit} (${tasks.length} categories).` : `No ${kind.unit} were deleted.`, done > 0 ? "success" : "info");
+      } catch (error) {
+        delToast(kind.title, error?.message === "cancelled" ? `Cancelled after ${fmtInt(done)} ${kind.unit}.` : error?.message || "Deletion failed.", "error");
+      } finally { running = false; paused = false; cancelled = false; waiter = null; emit({ type: "finished" }); }
+    }
+    return {
+      on: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+      getSelection: () => [...selection.values()],
+      setSelection(entries) { selection.clear(); for (const e of entries) if (e && e.id && e.qty > 0) selection.set(e.id, { ...e }); },
+      clearSelection: () => selection.clear(), run, isRunning: () => running, isPaused: () => paused,
+      pause() { if (!running || paused) return; paused = true; emit({ type: "paused" }); },
+      resume() { if (!running || !paused) return; paused = false; waiter?.(); emit({ type: "resumed" }); },
+      cancel() { if (!running) return; cancelled = true; paused = false; waiter?.(); }
+    };
+  }
+  const DELETERS = {
+    seed: makeDeleter({ title: "Seed deleter", unit: "seeds", storageId: "SeedSilo", load: seedEntries, deleteOne: async (species) => mustSend({ type: "Wish", itemId: species }) }),
+    decor: makeDeleter({
+      title: "Decor deleter", unit: "decor", storageId: "DecorShed", load: decorEntries,
+      async deleteOne(decorId, delayMs) {
+        const slot = await firstEmptyGardenSlot(); if (!slot) throw new Error("No empty garden tile to delete decor on.");
+        mustSend({ type: "PlaceDecor", tileType: slot.tileType, localTileIndex: slot.index, decorId, rotation: 0 });
+        if (delayMs > 0) await sleep(delayMs);
+        mustSend({ type: "RemoveGardenObject", slot: slot.index, slotType: slot.tileType });
+      }
+    })
+  };
+
+  // ---------- Display: crop price ----------
+  // Arie's mod draws this inside the game's own plant card. King's Mod has no access to the game canvas, so the price
+  // shows in a small badge you can drag anywhere, while a plant is selected.
+  const PRICE = { obj: null, slotId: null, players: 1, el: null };
+  function priceValue() {
+    const plant = PRICE.obj; if (!plant || plant.objectType !== "plant" || !Array.isArray(plant.slots)) return null;
+    const one = (s) => { const species = s?.species || plant.species, size = readCropSize({ ...s, species }); return size == null ? 0 : cropValue(species, size, s?.mutations, PRICE.players); };
+    const slots = plant.slots.filter(Boolean).sort((a, b) => (a.slotId || 0) - (b.slotId || 0)); if (!slots.length) return null;
+    const wanted = Number.isFinite(PRICE.slotId) ? PRICE.slotId : null;
+    const slot = wanted == null ? slots[0] : slots.find((s) => s.slotId === wanted) || slots.find((s) => (s.slotId || 0) >= wanted) || slots[0];
+    const single = slot ? one(slot) : 0, total = single > 0 ? single : slots.reduce((sum, s) => sum + one(s), 0);
+    return total > 0 ? total : null;
+  }
+  function priceEl() {
+    if (PRICE.el?.isConnected) return PRICE.el; if (!document.body) return null;
+    const el = h("div", "km-price", `<span aria-hidden="true">🪙</span><b></b>`); el.id = PRICE_ID; el.title = "Crop value — drag to move"; el.style.display = "none";
+    makeMovable(el, el, PRICE_POS_KEY); applySavedPos(el, PRICE_POS_KEY); document.body.append(el); return (PRICE.el = el);
+  }
+  function priceSync() {
+    const value = MISC.cropPrice ? priceValue() : null;
+    if (value == null) { if (PRICE.el) PRICE.el.style.display = "none"; return; }
+    const el = priceEl(); if (!el) return; el.querySelector("b").textContent = fmtCoins(value); el.style.display = "flex";
+  }
+  function startPrice() {
+    void followAtom("myCurrentGardenObjectAtom", (v) => { PRICE.obj = v && typeof v === "object" ? v : null; priceSync(); });
+    void followAtom("numPlayersAtom", (v) => { const n = Number(v); if (Number.isFinite(n) && n > 0) PRICE.players = n; priceSync(); });
+    void (async () => {   // the selected-slot atom has had a few names across game versions
+      for (let i = 0; i < 120; i++) {
+        const label = ["selectedCropSlotIdAtom", "myCurrentGrowSlotIdAtom", "mySelectedSlotIdAtom"].find((l) => findAtom(l));
+        if (label) { await followAtom(label, (v) => { PRICE.slotId = Number.isFinite(Number(v)) && v !== null ? Number(v) : null; priceSync(); }); return; }
+        await sleep(1000);
+      }
+    })();
+  }
+
+  // ---------- Misc window ----------
+  const MISC_ICON = '<path d="M5 8h4a2 2 0 1 1 4 0h4v4a2 2 0 1 1 0 4v4H5z"/>';
+  const GVIEW_ICON = '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>';
+  Object.assign(ICONS, { misc: MISC_ICON, gview: GVIEW_ICON });
+  ITEMS.push({ id: "misc", win: "misc", icon: "misc", label: "Misc", title: "Misc — Alt + M" });
+
+  const miscBtn = (label, onClick, cls) => { const b = h("button", `kx-btn${cls ? ` ${cls}` : ""}`, esc(label)); b.type = "button"; b.onclick = onClick; return b; };
+  function miscCard(id, title, desc) {
+    const root = h("section", "kx-setcard km-card"), head = h("div", "km-head", `<span><b>${esc(title)}</b>${desc ? `<small>${esc(desc)}</small>` : ""}</span><i aria-hidden="true">▾</i>`), body = h("div", "km-cbody");
+    head.setAttribute("role", "button"); head.tabIndex = 0;
+    const apply = () => { root.dataset.collapsed = String(MISC.collapsed[id] === true); head.setAttribute("aria-expanded", String(MISC.collapsed[id] !== true)); };
+    const flip = () => { if (MISC.collapsed[id]) delete MISC.collapsed[id]; else MISC.collapsed[id] = true; saveMisc(); apply(); };
+    head.onclick = flip; head.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } };
+    apply(); root.append(head, body); return { root, body };
+  }
+  function miscRow(label, hint, control) { const row = h("div", "km-row", `<span><b>${esc(label)}</b>${hint ? `<small>${esc(hint)}</small>` : ""}</span>`); if (control) row.append(control); return row; }
+  function miscSwitch(label, hint, on, onChange, icon) {
+    const row = toggleRow(label, hint, on, onChange);
+    if (icon) { const wrap = h("div", "km-ic"); wrap.append(spr(icon.urls, 24, icon.emoji), row.firstElementChild); row.prepend(wrap); }
+    return row;
+  }
+  const miscDisposers = [];
+  function renderMisc(body, win) {
+    for (const f of miscDisposers.splice(0)) { try { f(); } catch {} }
+    win.root.querySelectorAll(".km-ov").forEach((n) => n.remove());
+    ensureMiscStyles(); win.setSub("Display, movement, inventory and bulk deleters"); body.classList.add("km-misc");
+    body.append(displayCard(), movementCard(), inventoryCard(), deleterCard(win, DEL_SEED), deleterCard(win, DEL_DECOR), reconnectCard());
+    return null;
+  }
+  function displayCard() {
+    const c = miscCard("display", "Display", "What the mod adds to the game's screens.");
+    c.body.append(
+      miscSwitch("Crop price", "A crop's sell price, shown while a plant is selected.", MISC.cropPrice, (v) => { MISC.cropPrice = v; saveMisc(); priceSync(); }),
+      miscRow("Garden view", "Your whole garden as a flat grid, nothing hidden.", miscBtn("Open", () => WINS.gview?.openWin()))
+    );
+    return c.root;
+  }
+  function movementCard() {
+    const c = miscCard("player", "Movement"), num = h("input", "kx-search km-num");
+    num.type = "number"; num.min = "10"; num.max = "1000"; num.step = "5"; num.value = String(MISC.ghostDelay); num.setAttribute("aria-label", "Step delay in milliseconds");
+    num.onchange = () => { const v = clamp(Math.floor(Number(num.value) || 50), 10, 1000); num.value = String(v); MISC.ghostDelay = v; saveMisc(); };
+    c.body.append(miscSwitch("Ghost mode", "Walk through anything in your way.", MISC.ghost, setGhost), miscRow("Step delay", "Milliseconds per step. Lower is faster.", num));
+    return c.root;
+  }
+  function inventoryCard() {
+    const c = miscCard("inventory", "Inventory", "Keep room free, and put away what already has a place.");
+    c.body.append(
+      miscSwitch("Keep one slot free", "At 99 of 100, refuses anything that needs a new slot.", MISC.keepSlot, (v) => { MISC.keepSlot = v; saveMisc(); }, { urls: [spriteUrl("ui", "InventoryBag")], emoji: "🎒" }),
+      h("div", "km-sub", "Auto-store new items in"),
+      miscSwitch("Seed Silo", "Seeds of a species it already holds.", AUTO_STORE.silo.isOn(), (v) => AUTO_STORE.silo.set(v), { urls: SPR.decor("SeedSilo"), emoji: "🌾" }),
+      miscSwitch("Decor Shed", "Decor it already holds.", AUTO_STORE.decor.isOn(), (v) => AUTO_STORE.decor.set(v), { urls: SPR.decor("DecorShed"), emoji: "🪴" }),
+      miscSwitch("Tool Shack", "Tools it already holds.", AUTO_STORE.tool.isOn(), (v) => AUTO_STORE.tool.set(v), { urls: SPR.decor("ToolShack"), emoji: "🧰" })
+    );
+    return c.root;
+  }
+  function reconnectCard() {
+    const c = miscCard("autoReco", "Auto reconnect", "Log back in when this account opens in another session."), on = h("input"), range = h("input", "kx-range");
+    on.type = "checkbox"; on.disabled = true; range.type = "range"; range.min = "0"; range.max = "300"; range.step = "30"; range.value = "30"; range.disabled = true;
+    const toggle = h("label", "kx-trow", `<span><b>Enabled</b></span>`); toggle.append(on);
+    const delay = h("div", "kx-trow", `<span><b>Delay</b><small>Wait before reconnecting.</small></span>`); delay.append(range);
+    c.body.append(h("div", "km-note", "Turned off for now, at the game developers' request. It should come back later."), toggle, delay);
+    return c.root;
+  }
+
+  const miscDur = (ms) => { if (ms < 1000) return `${ms} ms`; const s = ms / 1000; if (s < 10) return `${s.toFixed(1)} s`; if (s < 90) return `${Math.round(s)} s`; const m = Math.floor(s / 60), r = Math.round(s % 60); return r === 0 ? `${m} min` : `${m} min ${r} s`; };
+  const miscClock = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const miscCounted = (n, noun) => `${fmtInt(n)} ${n === 1 ? noun.one : noun.many}`;
+  const DEL_SEED = { id: "seedDeleter", ctl: DELETERS.seed, title: "Seed deleter", desc: "Delete seeds in bulk, from your inventory and Seed Silo.", emoji: "🌱", icon: [spriteUrl("ui", "SeedIcon")], urls: (id) => SPR.seed(id), unit: { one: "seed", many: "seeds" }, group: { one: "species", many: "species" }, selectLabel: "Choose seeds", storageLabel: "Seed Silo", storageNoun: "silo", pickTitle: "Select seeds", estDelay: 35, runDelay: 35 };
+  const DEL_DECOR = { id: "decorDeleter", ctl: DELETERS.decor, title: "Decor deleter", desc: "Delete decor in bulk, from your inventory and Decor Shed.", emoji: "🪴", icon: [spriteUrl("ui", "DecorIcon")], urls: (id) => SPR.decor(id), unit: { one: "item", many: "items" }, group: { one: "kind", many: "kinds" }, selectLabel: "Choose decor", storageLabel: "Decor Shed", storageNoun: "shed", pickTitle: "Select decor", estDelay: 70, runDelay: 35 };   // decor costs about two round trips each, so the estimate doubles the delay
+  DEL_SEED.load = seedEntries; DEL_DECOR.load = decorEntries;
+
+  function openPicker(win, d) {
+    return new Promise((resolve) => {
+      win.root.querySelectorAll(".km-ov").forEach((n) => n.remove());
+      const ov = h("div", "km-ov"), card = h("div", "km-pk"), top = h("div", "km-pk-top", `<b>${esc(d.pickTitle)}</b>`), x = h("button", "km-pk-x", "×");
+      x.type = "button"; x.setAttribute("aria-label", "Close"); top.append(x);
+      const search = h("input", "kx-search"); search.type = "search"; search.placeholder = `Search ${d.unit.many}…`; search.setAttribute("aria-label", `Search ${d.unit.many}`);
+      const ctl = h("div", "km-pk-ctl"), list = h("div", "km-pk-list"), foot = h("div", "km-pk-foot"), sum = h("span", "km-pk-sum");
+      const all = miscBtn("All", () => setAll((e) => e.total), "ghost"), none = miscBtn("None", () => setAll(() => 0), "ghost");
+      const cancel = miscBtn("Cancel", () => close(), "ghost"), confirm = miscBtn("Confirm selection", () => {
+        const out = new Map(); for (const [id, q] of picked) if (q > 0) out.set(id, q);
+        d.ctl.setSelection([...out].map(([id, qty]) => { const e = entries.find((c) => c.id === id); return { id, qty, label: e?.label ?? id, fromStorage: Math.max(0, qty - (e?.invQty ?? 0)) }; }));
+        close();
+      });
+      ctl.append(search, all, none); foot.append(sum, cancel, confirm); card.append(top, ctl, list, foot); ov.append(card); win.root.append(ov);
+      const picked = new Map(d.ctl.getSelection().map((e) => [e.id, e.qty])); let entries = [], filter = "", open = true;
+      function close() { if (!open) return; open = false; ov.remove(); resolve(); }
+      x.onclick = close; ov.addEventListener("pointerdown", (e) => { if (e.target === ov) close(); });
+      const visible = () => (filter ? entries.filter((e) => e.label.toLowerCase().includes(filter) || e.id.toLowerCase().includes(filter)) : entries);
+      function setAll(qtyFor) { for (const e of visible()) { const q = qtyFor(e); if (q > 0) picked.set(e.id, q); else picked.delete(e.id); } paint(); }
+      function summary() {
+        let groups = 0, units = 0, fromStorage = 0;
+        for (const e of entries) { const q = picked.get(e.id) || 0; if (q <= 0) continue; groups++; units += q; fromStorage += Math.max(0, q - e.invQty); }
+        sum.textContent = groups === 0 ? "Nothing selected." : `${groups} selected · ${fmtInt(units)} ${d.unit.many}${fromStorage > 0 ? ` · ${fmtInt(fromStorage)} from the ${d.storageNoun}` : ""}`; confirm.disabled = groups === 0;
+      }
+      function row(e) {
+        const q = picked.get(e.id) || 0, r = h("div", "km-pk-row"); r.dataset.on = String(q > 0);
+        r.onclick = () => { if ((picked.get(e.id) || 0) > 0) picked.delete(e.id); else picked.set(e.id, e.total); paint(); };
+        const amt = h("input", "kx-search km-pk-amt"); amt.type = "number"; amt.min = "0"; amt.max = String(e.total); amt.step = "1"; amt.value = String(q); amt.onclick = (ev) => ev.stopPropagation();
+        amt.onchange = (ev) => { ev.stopPropagation(); const n = Math.max(0, Math.min(e.total, Math.floor(Number(amt.value) || 0))); if (n > 0) picked.set(e.id, n); else picked.delete(e.id); paint(); };
+        r.append(spr(d.urls(e.id), 28, d.emoji), h("span", "km-pk-n", `<b>${esc(e.label)}</b><small>${e.storeQty > 0 ? `${fmtInt(e.total)} · ${fmtInt(e.invQty)} held, ${fmtInt(e.storeQty)} in ${esc(d.storageNoun)}` : `${fmtInt(e.total)} held`}</small>`), amt); return r;
+      }
+      function paint() {
+        if (!open) return; list.replaceChildren(); const rows = visible();
+        if (!rows.length) list.append(h("p", "kx-muted", entries.length ? "No match." : `You have no ${d.unit.many} to delete, in your inventory or your ${d.storageNoun}.`)); else for (const e of rows) list.append(row(e));
+        summary();
+      }
+      search.oninput = () => { filter = search.value.trim().toLowerCase(); paint(); };
+      list.append(h("p", "kx-muted", "Reading inventory…")); summary();
+      d.load().then((loaded) => {
+        if (!open) return; entries = loaded;
+        for (const [id, q] of [...picked]) { const e = entries.find((c) => c.id === id); if (!e) picked.delete(id); else picked.set(id, Math.min(q, e.total)); }
+        paint();
+      }).catch(() => { if (!open) return; entries = []; paint(); sum.textContent = "Could not read the inventory."; });
+      search.focus();
+    });
+  }
+  function deleterCard(win, d) {
+    const c = miscCard(d.id, d.title, d.desc), ctl = d.ctl, progress = { target: "-", done: 0, total: 0 };
+    const empty = h("div", "km-empty"); empty.append(spr(d.icon, 30, d.emoji), h("span", "", `<b>Nothing picked yet</b><small>Choose from your inventory and your ${esc(d.storageLabel)}.</small>`));
+    const tVal = h("b"), tGrp = h("span"), tSto = h("em"), totals = h("div", "km-tot"), chips = h("div", "km-chips"), est = h("small", "km-est"), selWrap = h("div", "km-sel");
+    totals.append(tVal, tGrp, tSto); selWrap.append(totals, chips, est);
+    const pTarget = h("b"), pCount = h("span"), pLine = h("div", "km-pline"), bar = h("div", "kx-bar"), barI = h("i"), progWrap = h("div", "km-prog");
+    bar.append(barI); pLine.append(pTarget, pCount); progWrap.append(pLine, bar);
+    const bSelect = miscBtn(d.selectLabel, () => runSelect()), bClear = miscBtn("Clear", () => { ctl.clearSelection(); summary(); }, "ghost"), bDelete = miscBtn("Start deleting", () => runDelete(), "km-danger");
+    const bPause = miscBtn("Pause", () => { ctl.pause(); controls(); }), bPlay = miscBtn("Resume", () => { ctl.resume(); controls(); }), bStop = miscBtn("Stop", () => { ctl.cancel(); controls(); }, "km-danger");
+    const actions = h("div", "km-act"); actions.append(bSelect, bClear, h("span", "km-grow"), bDelete, bPause, bPlay, bStop);
+    c.body.append(empty, selWrap, progWrap, actions);
+    let finishAt = null, timer = null; const estMs = (n) => n * (d.estDelay + 10), stopTimer = () => { if (timer !== null) { clearTimeout(timer); timer = null; } };
+    function read() { const selection = ctl.getSelection(); let qty = 0, fromStorage = 0; for (const s of selection) { qty += Math.max(0, Math.floor(s.qty || 0)); fromStorage += Math.max(0, Math.floor(s.fromStorage || 0)); } return { selection, groups: selection.length, qty, fromStorage }; }
+    function visibility() {
+      const running = ctl.isRunning(), paused = ctl.isPaused(), r = read(), has = r.qty > 0;
+      empty.hidden = running || r.groups > 0; selWrap.hidden = running || r.groups === 0; progWrap.hidden = !running;
+      bSelect.hidden = running; bClear.hidden = running || r.groups === 0; bDelete.hidden = running || !has; bPause.hidden = !running || paused; bPlay.hidden = !running || !paused; bStop.hidden = !running;
+    }
+    function summary() {
+      const r = read(), running = ctl.isRunning(), has = r.groups > 0 && r.qty > 0;
+      tVal.textContent = miscCounted(r.qty, d.unit); tGrp.textContent = miscCounted(r.groups, d.group); tSto.textContent = `${fmtInt(r.fromStorage)} from the ${d.storageLabel}`; tSto.hidden = r.fromStorage <= 0;
+      chips.replaceChildren(); const sorted = [...r.selection].sort((a, b) => b.qty - a.qty);
+      for (const s of sorted.slice(0, 4)) { const chip = h("span", "km-chip"); chip.title = s.label || s.id; chip.append(spr(d.urls(s.id), 20, d.emoji), h("span", "km-chip-n", esc(s.label || s.id)), h("b", "", fmtInt(s.qty))); chips.append(chip); }
+      if (sorted.length > 4) chips.append(h("span", "km-chip km-chip-more", `+${sorted.length - 4} more`));
+      const ms = estMs(r.qty), at = running ? finishAt : ms > 0 ? Date.now() + ms : null;
+      est.textContent = r.qty <= 0 ? "" : at ? `About ${miscDur(ms)}, done around ${miscClock(at)}` : `About ${miscDur(ms)}`;
+      bSelect.classList.toggle("ghost", has); bDelete.disabled = !has || running; bClear.disabled = !has || running; bSelect.disabled = running; visibility();
+      stopTimer(); if (!running && r.qty > 0) timer = setTimeout(summary, 1000);
+    }
+    function controls() {
+      const running = ctl.isRunning(), paused = ctl.isPaused(); visibility();
+      if (running) { barI.style.width = `${progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0}%`; bar.dataset.w = paused ? "1" : "0"; pTarget.textContent = paused ? `Paused, ${progress.target || "-"}` : progress.target || "-"; pCount.textContent = `${fmtInt(progress.done)} / ${fmtInt(progress.total)}`; }
+      bPause.disabled = !running || paused; bPlay.disabled = !running || !paused; bStop.disabled = !running;
+    }
+    async function runSelect() { await openPicker(win, d); summary(); controls(); }
+    async function runDelete() { const ms = estMs(read().qty); finishAt = ms > 0 ? Date.now() + ms : null; stopTimer(); const pending = ctl.run(d.runDelay); controls(); summary(); await pending; finishAt = null; controls(); summary(); }
+    const off = ctl.on((e) => {
+      if (e.type === "progress") { progress.target = e.label || "-"; progress.done = e.done; progress.total = e.total; controls(); }
+      else if (e.type === "finished") { progress.target = "-"; progress.done = 0; progress.total = 0; controls(); summary(); }
+      else if (e.type === "paused" || e.type === "resumed") controls();
+    });
+    miscDisposers.push(off, stopTimer); summary(); controls(); return c.root;
+  }
+
+  // ---------- Garden view window (opened from Misc > Display) ----------
+  function renderGardenView(body, win) {
+    const COLS = 20, ROWS = 10, TOTAL = COLS * ROWS;
+    ensureMiscStyles(); win.setSub("Every tile gets the same space, so nothing hides behind a taller plant"); body.classList.add("km-gv");
+    const search = h("input", "kx-search"); search.type = "search"; search.placeholder = "Find a plant…"; search.setAttribute("aria-label", "Find a plant");
+    const summary = h("span", "km-gv-sum"), bar = h("div", "km-gv-bar"), grid = h("div", "km-gv-grid"), hint = h("p", "kx-muted", "Hover a tile for its name.");
+    bar.append(search, summary); grid.style.gridTemplateColumns = `repeat(${COLS / 2}, 1fr) 12px repeat(${COLS / 2}, 1fr)`; grid.style.gridTemplateRows = `repeat(${ROWS}, 1fr)`; grid.style.aspectRatio = `${COLS + 0.6} / ${ROWS}`;
+    const cells = [];
+    for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { if (c === COLS / 2) grid.append(h("div")); const el = h("div", "km-gv-cell"); cells[r * COLS + c] = { el, shown: null, content: null }; grid.append(el); }
+    body.append(bar, grid, hint);
+    function contentOf(raw) {
+      if (!raw || typeof raw !== "object") return null; const type = String(raw.objectType ?? "");
+      if (type === "plant" && typeof raw.species === "string") return { kind: "plant", id: raw.species, name: cropName(raw.species) };
+      if (type === "egg") { const id = String(raw.eggId ?? raw.id ?? ""); return id ? { kind: "egg", id, name: KD.eggs[id]?.n || pretty(id) } : null; }
+      if (type === "decor" && typeof raw.decorId === "string") return { kind: "decor", id: raw.decorId, name: KD.decor[raw.decorId]?.n || pretty(raw.decorId) };
+      return null;
+    }
+    const iconOf = (c) => (c.kind === "plant" ? spr(SPR.crop(c.id), 30, EMOJI.crop) : c.kind === "egg" ? spr(SPR.egg(c.id), 30, EMOJI.egg) : spr(SPR.decor(c.id), 30, EMOJI.decor));
+    function filterNow() {
+      const q = search.value.trim().toLowerCase(); let hits = 0, filled = 0;
+      for (const cell of cells) {
+        if (cell.content) filled++; const hit = !!q && !!cell.content && (cell.content.name.toLowerCase().includes(q) || cell.content.id.toLowerCase().includes(q));
+        if (hit) hits++; cell.el.classList.toggle("is-hit", hit); cell.el.classList.toggle("is-dimmed", !!q && !hit);
+      }
+      summary.textContent = q ? `${hits} match${hits === 1 ? "" : "es"}` : `${filled} / ${TOTAL} tiles used`;
+    }
+    let busy = false;
+    async function update() {
+      if (busy) return; busy = true;
+      try {
+        const objs = (await atomValue("myDataAtom"))?.garden?.tileObjects, tiles = objs && typeof objs === "object" ? objs : {};
+        for (let i = 0; i < TOTAL; i++) {
+          const cell = cells[i], content = contentOf(tiles[String(i)]), key = content ? `${content.kind}:${content.id}` : "free";
+          cell.content = content; if (key === cell.shown) continue; cell.shown = key; cell.el.replaceChildren();
+          cell.el.classList.toggle("is-free", !content); cell.el.classList.toggle("is-used", !!content);
+          if (!content) { cell.el.title = "Empty"; continue; }
+          cell.el.title = content.kind === "plant" ? content.name : `${content.name} (${content.kind})`; cell.el.append(iconOf(content));
+        }
+        filterNow();
+      } finally { busy = false; }
+    }
+    search.addEventListener("input", filterNow); void update(); return { update };
+  }
+  createWin({ id: "misc", title: "Misc", icon: "misc", accent: ["#b79af5", "#e0d2ff"], w: 540, h: 620, tabs: [{ id: "misc", label: "Misc", render: renderMisc }] });
+  createWin({ id: "gview", title: "Garden view", icon: "gview", accent: ["#7dd3a0", "#c8f3d6"], w: 760, h: 560, every: 1500, tabs: [{ id: "garden", label: "Garden", render: renderGardenView }] });
+
+  const MISC_CSS = `
+.km-misc{display:grid;align-content:start;gap:0}
+.km-card .kx-btn{margin-top:0}
+.km-head{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;user-select:none;padding:2px 0}
+.km-head>span{display:grid;gap:1px;min-width:0}.km-head b{font:700 14px Georgia,"Palatino Linotype",serif;color:var(--ac2)}.km-head small{color:#8db5a0;font-weight:600}
+.km-head i{flex:none;font-style:normal;color:#8db5a0;transition:transform .15s ease}.km-card[data-collapsed="true"] .km-head i{transform:rotate(-90deg)}
+.km-cbody{display:grid;gap:4px;padding-top:6px}.km-card[data-collapsed="true"] .km-cbody{display:none}
+.km-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;min-height:34px}
+.km-row>span{display:grid;flex:1 1 150px}.km-row small{color:#8db5a0;font-weight:600}
+.km-ic{display:flex;align-items:center;gap:9px;min-width:0}.km-ic>span{display:grid}.km-ic small{color:#8db5a0;font-weight:600}
+.km-sub{margin:6px 2px 0;font-size:11.5px;font-weight:800;color:#8db5a0}
+.kx-search.km-num{width:78px;flex:none;padding:6px 8px;text-align:right}
+.km-note{padding:8px 11px;border-radius:11px;background:rgba(245,158,11,.14);color:#f7d58b;font-size:11.5px;line-height:1.45}
+.km-empty{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:12px;border:1px dashed rgba(255,255,255,.16);color:#8db5a0}.km-empty>span:last-child{display:grid}.km-empty b{color:#e9f2ec}
+.km-sel{display:grid;gap:7px}.km-tot{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 10px}.km-tot b{font-size:15px;color:var(--ac2)}.km-tot span{color:#a9c4b4}
+.km-tot em{font-style:normal;font-size:10.5px;padding:2px 8px;border-radius:99px;background:rgba(245,158,11,.18);color:#f7d58b}
+.km-chips{display:flex;flex-wrap:wrap;gap:6px}.km-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px 3px 5px;border-radius:99px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05)}
+.km-chip-n{max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.km-chip b{color:var(--ac2)}.km-chip-more{padding:3px 10px;color:#a9c4b4}
+.km-est{color:#8db5a0}
+.km-prog{display:grid;gap:6px}.km-pline{display:flex;justify-content:space-between;gap:8px}.km-pline b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.km-pline span{color:#a9c4b4;font-variant-numeric:tabular-nums}
+.km-act{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:2px}.km-grow{flex:1}
+.kx-btn.km-danger{border-color:#f87171;background:linear-gradient(145deg,rgba(248,113,113,.28),rgba(248,113,113,.1));color:#fecaca}
+.km-ov{position:absolute;inset:0;z-index:6;display:flex;align-items:center;justify-content:center;padding:12px;overflow:hidden;background:rgba(3,10,6,.68)}
+.km-pk{display:flex;flex-direction:column;gap:8px;width:min(460px,100%);max-height:100%;min-height:0;padding:12px;border-radius:16px;background:linear-gradient(170deg,#163120,#0a1a11);border:1px solid color-mix(in srgb,var(--ac) 42%,transparent);box-shadow:0 18px 44px rgba(0,0,0,.6)}
+.km-pk-top,.km-pk-ctl,.km-pk-foot{flex:none}.km-pk-top{display:flex;align-items:center;justify-content:space-between}.km-pk-top b{font:700 15px Georgia,serif;color:var(--ac2)}
+.km-pk-x{width:26px;height:26px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#d9e8de;font-size:16px;cursor:pointer}.km-pk-x:hover{color:var(--ac2);border-color:var(--ac)}
+.km-pk-ctl{display:flex;gap:6px}.km-pk-ctl .kx-search{flex:1;min-width:0}
+.km-pk-list{flex:1 1 auto;min-height:0;overflow:auto;display:grid;gap:4px;align-content:start;scrollbar-width:thin;scrollbar-color:#2f6a49 transparent}
+.km-pk-row{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:10px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);cursor:pointer}
+.km-pk-row[data-on="true"]{border-color:var(--ac);background:color-mix(in srgb,var(--ac) 16%,transparent)}
+.km-pk-n{flex:1;min-width:0;display:grid}.km-pk-n b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.km-pk-n small{color:#8db5a0;font-weight:600}
+.kx-search.km-pk-amt{width:72px;flex:none;padding:5px 7px;text-align:right}
+.km-pk-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.km-pk-sum{flex:1 1 140px;color:#a9c4b4}
+.km-gv{display:grid;align-content:start;gap:10px}.km-gv-bar{display:flex;align-items:center;gap:10px}.km-gv-bar .kx-search{flex:1}.km-gv-sum{color:#8db5a0;white-space:nowrap}
+.km-gv-grid{display:grid;gap:2px;width:100%;padding:6px;border-radius:14px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.28)}
+.km-gv-cell{display:flex;align-items:center;justify-content:center;min-width:0;min-height:0;overflow:hidden;border-radius:4px;border:1px solid transparent;transition:opacity .09s ease,background .09s ease}
+.km-gv-cell.is-free{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.08)}.km-gv-cell.is-used{background:color-mix(in srgb,var(--ac) 14%,transparent);border-color:color-mix(in srgb,var(--ac) 38%,transparent)}
+.km-gv-cell.is-hit{border-color:var(--ac2)}.km-gv-cell.is-dimmed{opacity:.25}.km-gv-cell>*{pointer-events:none;max-width:100%;max-height:100%}
+.km-price{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483640;display:none;align-items:center;gap:7px;padding:5px 13px 5px 10px;border-radius:99px;border:1px solid rgba(240,195,90,.55);background:linear-gradient(135deg,rgba(28,38,30,.96),rgba(14,24,17,.96));box-shadow:0 8px 22px rgba(0,0,0,.5);color:#fef3c7;font:700 14px "Trebuchet MS",system-ui,sans-serif;font-variant-numeric:tabular-nums;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.km-price span{font-size:15px}`;
+  function ensureMiscStyles() { if (document.getElementById(MISC_STYLE_ID)) return; const style = document.createElement("style"); style.id = MISC_STYLE_ID; style.textContent = MISC_CSS; (document.head || document.documentElement).append(style); }
+
+  function miscBoot() {
+    ensureMiscStyles(); void followAtom("myInventoryAtom", refreshInv); startPrice();
+    for (const store of Object.values(AUTO_STORE)) store.boot();
+  }
+  installMiscSendGuard(); if (MISC.ghost) GHOST.start();
+  if (document.body) miscBoot(); else document.addEventListener("DOMContentLoaded", miscBoot, { once: true });
+  document.addEventListener("keydown", (event) => {   // Alt + M, like the other windows
+    const target = event.target; if (target?.isContentEditable || /^(input|textarea|select)$/i.test(target?.tagName || "")) return;
+    if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || event.code !== "KeyM") return;
+    event.preventDefault(); event.stopPropagation(); WINS.misc?.toggle();
+  }, true);
+
   if (document.body) install(); else document.addEventListener("DOMContentLoaded", install, { once: true });
 })();
