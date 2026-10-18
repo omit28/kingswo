@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.2.1
+// @version      3.3.0
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
