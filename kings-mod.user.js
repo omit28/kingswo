@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.3.0
+// @version      3.4.1
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -914,7 +914,21 @@
     { id: "coins", name: "More coins", emoji: "🪙", abil: ["CoinFinderIII", "CoinFinderII", "CoinFinderI", "SellBoostIV", "SellBoostIII", "SellBoostII", "SellBoostI"] },
     { id: "gold", name: "Gold and Rainbow", emoji: "🌈", abil: ["RainbowGranter", "GoldGranter"], wants: true },
     { id: "wx", name: "Weather mutations", emoji: "🌦️", abil: ["RainDance", "FrostGranter", "SnowGranter", "DawnlitGranter", "AmberlitGranter", "ProduceMutationBoostIII", "ProduceMutationBoostII", "ProduceMutationBoost"] },
-    { id: "seed", name: "Seeds and doubles", emoji: "🌾", abil: ["SeedFinderIV", "SeedFinderIII", "SeedFinderII", "SeedFinderI", "DoubleHarvest", "DoubleHatch"] }
+    { id: "seed", name: "Seeds and doubles", emoji: "🌾", abil: ["SeedFinderIV", "SeedFinderIII", "SeedFinderII", "SeedFinderI", "DoubleHarvest", "DoubleHatch"] },
+    { id: "dawn", name: "Dawn boost", emoji: "🌅", abil: ["DawnlitGranter", "DawnBoost", "DawnKisser"] },
+    { id: "amber", name: "Amber boost", emoji: "🌙", abil: ["AmberlitGranter", "AmberMoonBoost", "MoonKisser"] },
+    { id: "snow", name: "Snow boost", emoji: "❄️", abil: ["SnowyCropSizeBoost", "SnowyCropMutationBoost", "FrostGranter", "SnowGranter", "SnowyPlantGrowthBoost", "SnowyEggGrowthBoost", "SnowyPetXpBoost", "SnowyCoinFinder"] },
+    { id: "rain", name: "Rain Dance", emoji: "🌧️", abil: ["RainDance"] },
+    { id: "sell", name: "Crop sell price", emoji: "💰", abil: ["SellBoostIV", "SellBoostIII", "SellBoostII", "SellBoostI", "ProduceRefund"] },
+    { id: "finder", name: "Coin finders", emoji: "🪙", abil: ["CoinFinderIII", "CoinFinderII", "CoinFinderI", "SnowyCoinFinder"] },
+    { id: "dharvest", name: "Double harvest", emoji: "🧺", abil: ["DoubleHarvest"] },
+    { id: "dhatch", name: "Double hatch", emoji: "🐣", abil: ["DoubleHatch"] },
+    { id: "hatchxp", name: "Hatch XP", emoji: "🍼", abil: ["PetAgeBoostIII", "PetAgeBoostII", "PetAgeBoost"] },
+    { id: "petmut", name: "Pet mutations", emoji: "🧬", abil: ["PetMutationBoostIII", "PetMutationBoostII", "PetMutationBoost"] },
+    { id: "seedf", name: "Seed finders", emoji: "🌰", abil: ["SeedFinderIV", "SeedFinderIII", "SeedFinderII", "SeedFinderI"] },
+    { id: "hunger", name: "Never hungry", emoji: "🍖", abil: ["HungerRestoreIII", "HungerRestoreII", "HungerRestore", "HungerBoostIII", "HungerBoostII", "HungerBoost", "SnowyHungerRestore", "SnowyHungerBoost"] },
+    { id: "skygrow", name: "Dawn/Amber grow", emoji: "🌄", abil: ["DawnPlantGrowthBoost", "AmberPlantGrowthBoost"] },
+    { id: "refund", name: "Pet refunds", emoji: "♻️", abil: ["PetRefundII", "PetRefund", "Copycat"] }
   ];
   const SUSTAIN = ["HungerRestoreIII", "HungerRestoreII", "HungerRestore", "SnowyHungerRestore", "HungerBoostIII", "HungerBoostII", "HungerBoost", "SnowyHungerBoost"];
   function goalScore(pet, goal) {
@@ -1403,7 +1417,7 @@
 .kx-body{flex:1;min-height:0;overflow:auto;padding:12px;scrollbar-width:thin;scrollbar-color:#2f6a49 transparent;container-type:inline-size}
 .kx-rh{position:absolute;top:56px;right:0;bottom:22px;width:7px;cursor:ew-resize;touch-action:none}.kx-rh.b{top:auto;left:0;right:22px;bottom:0;width:auto;height:7px;cursor:ns-resize}
 .kx-rg{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;touch-action:none;background:linear-gradient(135deg,transparent 50%,var(--ac) 50% 58%,transparent 58% 70%,var(--ac) 70% 78%,transparent 78%);opacity:.8}
-.kx-spr{flex:none;display:inline-grid;place-items:center;width:var(--z);height:var(--z);font-size:calc(var(--z) * .68);line-height:1}.kx-spr img{max-width:100%;max-height:100%;object-fit:contain;image-rendering:auto;display:block}
+.kx-spr{flex:none;display:inline-grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);place-items:center;width:var(--z);height:var(--z);overflow:hidden;font-size:calc(var(--z) * .68);line-height:1}.kx-spr img{width:100%;height:100%;max-width:100%;max-height:100%;object-fit:contain;image-rendering:auto;display:block}
 .kx-empty{display:grid;justify-items:center;gap:4px;padding:34px 12px;text-align:center;color:#8db5a0}.kx-empty-e{font-size:32px}.kx-empty b{color:#e9f2ec;font-size:13.5px}
 .kx-search{width:100%;padding:8px 11px;border-radius:11px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.28);color:#fff;font:600 12.5px "Trebuchet MS",system-ui,sans-serif;outline:none}.kx-search:focus{border-color:var(--ac)}
 .kx-btn{padding:7px 13px;border-radius:10px;border:1px solid var(--ac);background:linear-gradient(145deg,color-mix(in srgb,var(--ac) 30%,transparent),color-mix(in srgb,var(--ac) 12%,transparent));color:var(--ac2);font:700 12px "Trebuchet MS",system-ui,sans-serif;cursor:pointer;white-space:nowrap}.kx-btn:hover:not(:disabled){filter:brightness(1.25)}.kx-btn:disabled{opacity:.45;cursor:default}.kx-btn.ghost{border-color:rgba(255,255,255,.16);background:none;color:#a9bdb1}
