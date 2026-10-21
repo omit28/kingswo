@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.4.4
+// @version      3.4.5
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -21,7 +21,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.4.4", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.4.5", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const ALERT_KEY = "mg-king-alerts-v1";
@@ -2514,6 +2514,171 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
     if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || event.code !== "KeyM") return;
     event.preventDefault(); event.stopPropagation(); WINS.misc?.toggle();
   }, true);
+
+  // =====================================================================================================
+  //  Sell all Pets, ported from Arie's mod: a "Sell all Pets" button drawn next to the game's Sell Pet button
+  //  in the pet shop. It sells every pet that is not a favourite. Pets that match the Locker's sell-all-pets
+  //  protection rules are listed first so you can confirm. Self-contained: it only uses helpers defined above.
+  // =====================================================================================================
+  (function startSellAllPets() {
+    const HUD_LABEL = "ActionHud", FACE_LABEL = "McButtonFace", SELL_ACTIONS = new Set(["sellPet", "sellRainbowPet", "sellGoldPet"]);
+    const BTN_TEXT = "Sell all Pets", BTN_GAP = 10, BTN_PAD_X = 14, BTN_RADIUS = 10, BTN_FILL = 26548, BTN_BORDER = 4763124, BTN_BORDER_W = 2, HOVER_SCALE = 1.08, HOVER_EASE = 0.25, HOVER_EPS = 1e-3;
+    const BTN_TEXT_STYLE = { fontFamily: "Arial", fontSize: 14, fontWeight: "700", fill: "#FFFFFF" };
+    const px = { app: null, renderer: null, Text: null, Graphics: null };
+
+    // ---- Pixi capture (same hooks Arie's mod uses; chained so other mods keep working)
+    (function hookPixi() {
+      const chain = (name, cb) => { const prev = PW[name]; PW[name] = function () { try { cb.apply(this, arguments); } catch {} if (typeof prev === "function") { try { return prev.apply(this, arguments); } catch {} } }; };
+      chain("__PIXI_APP_INIT__", (a) => { if (a) { px.app = a; if (a.renderer) px.renderer = px.renderer || a.renderer; } });
+      chain("__PIXI_RENDERER_INIT__", (r) => { if (r) px.renderer = r; });
+      const resolveExisting = () => {
+        try {
+          const dt = PW.__PIXI_DEVTOOLS__; if (!px.renderer && dt?.renderers?.size > 0) px.renderer = [...dt.renderers][0];
+          const a = PW.__PIXI_APP__ || PW.PIXI_APP || PW.app; if (!px.app && a?.renderer) { px.app = a; px.renderer = px.renderer || a.renderer; }
+          if (!px.renderer) px.renderer = PW.__PIXI_RENDERER__ || PW.renderer || px.app?.renderer || null;
+        } catch {}
+      };
+      resolveExisting(); let n = 0; const t = setInterval(() => { resolveExisting(); if ((px.renderer && px.app) || ++n >= 300) clearInterval(t); }, 100);
+    })();
+
+    const getStage = () => { const r = px.renderer; return r?.lastObjectRendered ?? r?.stage ?? px.app?.stage ?? null; };
+    function findAcross(root, pred, limit = 25000) {   // first match, searching each top-level branch separately
+      if (!root) return null; if (pred(root)) return root; const kids = root.children; if (!Array.isArray(kids)) return null;
+      for (const child of kids) {
+        const stack = [child], seen = new Set(); let n = 0;
+        while (stack.length && n++ < limit) { const node = stack.pop(); if (!node || seen.has(node)) continue; seen.add(node); if (pred(node)) return node; const k = node.children; if (Array.isArray(k)) for (const c of k) stack.push(c); }
+      }
+      return null;
+    }
+    function findByLabel(root, label, limit = 25000) {
+      if (!root) return null; const stack = [root], seen = new Set(); let n = 0;
+      while (stack.length && n++ < limit) { const node = stack.pop(); if (!node || seen.has(node)) continue; seen.add(node); if (node.label === label) return node; const k = node.children; if (Array.isArray(k)) for (const c of k) stack.push(c); }
+      return null;
+    }
+    function findTextStyle(root, limit = 5000) {
+      const stack = [root], seen = new Set(); let n = 0;
+      while (stack.length && n++ < limit) { const node = stack.pop(); if (!node || seen.has(node)) continue; seen.add(node); if (typeof node.text === "string" && node.style && node.renderPipeId === "text") return node.style; const k = node.children; if (Array.isArray(k)) for (const c of k) stack.push(c); }
+      return null;
+    }
+    function ensureCtors() {   // Text and Graphics constructors are taken from nodes already on the game's stage
+      const stage = getStage(); if (!stage) return false;
+      if (!px.Text) { const t = findAcross(stage, (x) => (typeof x?.text === "string" || typeof x?.text === "number") && x?.style && x?.renderPipeId === "text"); if (t) px.Text = t.constructor; }
+      if (!px.Graphics) { const g = findAcross(stage, (x) => typeof x?.roundRect === "function" && typeof x?.clear === "function"); if (g) px.Graphics = g.constructor; }
+      return !!(px.Text && px.Graphics);
+    }
+    const safeSize = (node, prop, fallback) => { try { const v = node?.[prop]; return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback; } catch { return fallback; } };
+
+    // ---- what the player is doing right now (the game's own action atom)
+    let action = null, hud = null, bound = false;
+    const isSellAction = (a) => { if (typeof a === "string") return SELL_ACTIONS.has(a); if (a && typeof a === "object") { const t = a.type ?? a.action ?? a.name ?? a.id; return typeof t === "string" && SELL_ACTIONS.has(t); } return false; };
+
+    // ---- the button
+    let box = null, bg = null, label = null, canvasEl = null, canvasHooked = false, cursorSet = false, hovering = false, scale = 1, raf = null;
+    const rafOf = PW.requestAnimationFrame.bind(PW), cancelRafOf = PW.cancelAnimationFrame.bind(PW);
+    const stopAnim = () => { if (raf != null) { cancelRafOf(raf); raf = null; } };
+    const tick = () => { raf = null; if (!box || box.destroyed) return; const target = hovering ? HOVER_SCALE : 1; scale += (target - scale) * HOVER_EASE; if (Math.abs(target - scale) < HOVER_EPS) scale = target; box.scale.set(scale); if (scale !== target) raf = rafOf(tick); };
+    const setHover = (v) => { if (hovering === v) return; hovering = v; if (raf == null) raf = rafOf(tick); };
+    const forget = () => { stopAnim(); hovering = false; scale = 1; box = null; bg = null; label = null; };
+    const removeButton = () => { if (box) { try { box.destroy({ children: true }); } catch {} } forget(); };
+    const hit = (cx, cy) => {
+      if (!bg || bg.destroyed || !canvasEl) return false;
+      try { const r = canvasEl.getBoundingClientRect(), x = cx - r.left, y = cy - r.top, a = bg.toGlobal({ x: 0, y: 0 }), b = bg.toGlobal({ x: bg.width || 0, y: bg.height || 0 }); return x >= a.x && x <= b.x && y >= a.y && y <= b.y; } catch { return false; }
+    };
+    const onDown = (ev) => { if (hit(ev.clientX, ev.clientY)) void sellAllPets(); };
+    const onMove = (ev) => {
+      if (!canvasEl) return; const on = hit(ev.clientX, ev.clientY); setHover(on);
+      if (on && !cursorSet) { canvasEl.style.cursor = "pointer"; cursorSet = true; } else if (!on && cursorSet) { canvasEl.style.cursor = ""; cursorSet = false; }
+    };
+    const onLeave = () => { setHover(false); if (cursorSet && canvasEl) { canvasEl.style.cursor = ""; cursorSet = false; } };
+    function hookCanvas() {
+      if (canvasHooked) return; const c = px.renderer?.canvas || px.renderer?.view?.canvas || px.renderer?.view; if (!c || typeof c.addEventListener !== "function") return;
+      canvasEl = c; c.addEventListener("pointerdown", onDown); c.addEventListener("pointermove", onMove); c.addEventListener("pointerleave", onLeave); canvasHooked = true;
+    }
+    function syncUnsafe() {
+      if (!hud || hud.destroyed || !isSellAction(action)) { removeButton(); return; }
+      const wrapper = Array.isArray(hud.children) ? hud.children.find((c) => c && c !== box && !c.destroyed) : null; if (!wrapper) { removeButton(); return; }   // never measure our own button
+      if (!px.renderer || !ensureCtors()) return;
+      hookCanvas();
+      const face = findByLabel(wrapper, FACE_LABEL) ?? wrapper, faceW = safeSize(face, "width", 150), faceH = safeSize(face, "height", 55);
+      if (!box) {
+        const Container = getStage()?.constructor ?? hud.constructor; box = new Container(); const mine = box;
+        mine.once("destroyed", () => { if (box === mine) forget(); }); hud.addChildAt(mine, 0);
+      }
+      if (!label) { const ts = findTextStyle(wrapper); label = new px.Text({ text: BTN_TEXT, style: { ...BTN_TEXT_STYLE, ...(ts?.fontFamily ? { fontFamily: ts.fontFamily } : {}), ...(ts?.fontSize ? { fontSize: ts.fontSize } : {}), ...(ts?.fontWeight ? { fontWeight: ts.fontWeight } : {}) } }); box.addChild(label); }
+      if (!bg) { bg = new px.Graphics(); box.addChildAt(bg, 0); }
+      const textH = safeSize(label, "height", 20), badgeW = safeSize(label, "width", 100) + BTN_PAD_X * 2, badgeH = Math.max(faceH, textH + 12);
+      let anchor = { x: 0, y: 0 };
+      try { if (typeof face?.toGlobal === "function" && typeof hud.toLocal === "function") anchor = hud.toLocal(face.toGlobal({ x: faceW, y: faceH / 2 })); } catch {}
+      bg.clear(); bg.roundRect(0, 0, badgeW, badgeH, BTN_RADIUS).fill({ color: BTN_FILL }).stroke({ width: BTN_BORDER_W, color: BTN_BORDER });
+      label.position.set(BTN_PAD_X, (badgeH - textH) / 2); box.pivot.set(badgeW / 2, badgeH / 2); box.position.set(anchor.x + BTN_GAP + badgeW / 2, anchor.y);
+    }
+    const sync = () => { try { syncUnsafe(); } catch (error) { console.warn("[King's Mod] sell-all-pets button sync failed", error); try { removeButton(); } catch {} } };
+
+    // ---- finding the ActionHud and following the action atom
+    async function bindAction() {
+      if (bound) return; const s = await getStore(); if (!s) return; const atom = findAtom("actionAtom"); if (!atom) return;
+      const take = (v) => { Promise.resolve(v).then((val) => { action = val; sync(); }).catch(() => {}); };
+      try { s.sub(atom, () => { try { take(s.get(atom)); } catch {} }); } catch { return; }
+      bound = true; take(s.get(atom));
+    }
+    function watchHud() {
+      if (PW.__MG_SELL_ALL_PETS_PIXI_DEBUG__) return;   // Arie's mod already draws this button, do not draw a second one
+      if (hud && !hud.destroyed) { if (isSellAction(action)) sync(); return; }
+      if (hud) { hud = null; removeButton(); }
+      const stage = px.renderer ? getStage() : null; if (!stage) return;
+      const found = findAcross(stage, (n) => n?.label === HUD_LABEL); if (!found) return;
+      hud = found; try { found.on("childAdded", sync); found.once("destroyed", () => { if (hud === found) { hud = null; removeButton(); } }); } catch {}
+      sync();
+    }
+    setInterval(() => { void bindAction(); watchHud(); }, 1000);
+
+    // ---- selling
+    const isPet = (it) => !!it && it.itemType === "Pet" && typeof it.id === "string" && it.id.trim().length > 0;
+    async function unfavouritedPets() {
+      const inv = await atomValue("myInventoryAtom"), favs = new Set(Array.isArray(inv?.favoritedItemIds) ? inv.favoritedItemIds.filter((id) => typeof id === "string") : []);
+      return (Array.isArray(inv?.items) ? inv.items : []).filter(isPet).filter((p) => !favs.has(p.id));
+    }
+    function confirmProtected(flagged) {   // same idea as Arie's "Confirm sell all pets" window
+      return new Promise((resolve) => {
+        const ov = document.createElement("div"), card = document.createElement("div"); let done = false;
+        Object.assign(ov.style, { position: "fixed", inset: "0", zIndex: "2147483647", display: "grid", placeItems: "center", background: "rgba(0,0,0,.55)", font: '600 13px "Trebuchet MS",system-ui,sans-serif' });
+        Object.assign(card.style, { width: "min(520px,92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", gap: "10px", padding: "14px", boxSizing: "border-box", borderRadius: "16px", background: "linear-gradient(180deg,#2a2d2c,#1b1d1c)", border: "1px solid rgba(255,255,255,.12)", boxShadow: "0 14px 40px rgba(0,0,0,.6)", color: "#e8eeea" });
+        const finish = (v) => { if (done) return; done = true; document.removeEventListener("keydown", onKey, true); ov.remove(); resolve(v); };
+        const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); } };
+        const title = document.createElement("div"); title.textContent = "Confirm sell all pets"; Object.assign(title.style, { fontSize: "15px", fontWeight: "800", color: "#fde68a" });
+        const intro = document.createElement("div"); intro.textContent = "The following pets match protected rules:"; Object.assign(intro.style, { fontSize: "13px", lineHeight: "1.4", color: "#9db0a5" });
+        const list = document.createElement("div"); Object.assign(list.style, { display: "grid", gap: "8px", overflowY: "auto", minHeight: "0" });
+        for (const { pet, reasons } of flagged) {
+          const row = document.createElement("div"), info = document.createElement("div"), nm = document.createElement("div"), chips = document.createElement("div"), species = String(pet.petSpecies || "");
+          Object.assign(row.style, { display: "grid", gridTemplateColumns: "48px 1fr", gap: "10px", alignItems: "center", padding: "6px 8px", border: "1px solid rgba(255,255,255,.1)", borderRadius: "10px", background: "rgba(0,0,0,.24)" });
+          nm.textContent = pet.name ? `${pet.name} (${species || "Pet"})` : species || "Pet"; Object.assign(nm.style, { fontWeight: "700", fontSize: "13px" });
+          Object.assign(chips.style, { display: "flex", flexWrap: "wrap", gap: "6px" });
+          for (const r of reasons) { const chip = document.createElement("span"); chip.textContent = r; Object.assign(chip.style, { padding: "2px 8px", borderRadius: "999px", fontSize: "11px", background: "rgba(246,160,74,.18)", border: "1px solid rgba(246,160,74,.5)", color: "#ffd59a" }); chips.append(chip); }
+          Object.assign(info.style, { display: "grid", gap: "4px" }); info.append(nm, chips);
+          row.append(spr(SPR.pet(species, Array.isArray(pet.mutations) ? pet.mutations.map(String) : []), 48, EMOJI.pet), info); list.append(row);
+        }
+        const foot = document.createElement("div"); Object.assign(foot.style, { display: "flex", justifyContent: "flex-end", gap: "8px" });
+        const mk = (text, primary, fn) => { const b = document.createElement("button"); b.type = "button"; b.textContent = text; Object.assign(b.style, { padding: "7px 16px", borderRadius: "10px", font: '700 12px "Trebuchet MS",system-ui,sans-serif', cursor: "pointer", border: primary ? "1px solid #f6a04a" : "1px solid rgba(255,255,255,.2)", background: primary ? "#f6a04a" : "rgba(255,255,255,.06)", color: primary ? "#10200f" : "#cfd8d2" }); b.onclick = fn; return b; };
+        const sell = mk("Sell", true, () => finish(true));
+        foot.append(mk("Cancel", false, () => finish(false)), sell); card.append(title, intro, list, foot); ov.append(card);
+        ov.addEventListener("pointerdown", (e) => { if (e.target === ov) finish(false); });
+        document.addEventListener("keydown", onKey, true); document.body.append(ov); sell.focus();
+      });
+    }
+    let selling = false;
+    async function sellAllPets() {
+      if (selling) return; selling = true;
+      try {
+        const pets = await unfavouritedPets(); if (!pets.length) return;
+        const flagged = LKR.sellAllPets.enabled ? pets.map((pet) => ({ pet, reasons: lkPetReasons(pet) })).filter((x) => x.reasons.length) : [];
+        if (flagged.length && !(await confirmProtected(flagged))) { toast("Sell all Pets", "Sale cancelled.", { emoji: "🐾" }); return; }
+        let sold = 0, failures = 0, total = 0;
+        for (const pet of pets) { if (sendGame({ type: "SellPet", itemId: pet.id })) { sold += 1; total += normPet(pet, "")?.value || 0; } else failures += 1; }
+        if (failures === 0) toast("Sell all Pets", `${sold} pets have been sold for ${fmtInt(total)} coins!`, { emoji: "🐾" });
+        else toast("Could not reach the game", "Reload the page and try again.", { emoji: "⚠️", kind: "warn" });
+      } catch (error) { console.warn("[King's Mod] sell all pets failed", error); } finally { selling = false; }
+    }
+  })();
 
   if (document.body) install(); else document.addEventListener("DOMContentLoaded", install, { once: true });
 })();
