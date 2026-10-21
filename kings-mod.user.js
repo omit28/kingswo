@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.4.3
+// @version      3.4.4
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -21,7 +21,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.4.3", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.4.4", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const ALERT_KEY = "mg-king-alerts-v1";
@@ -50,6 +50,14 @@
   }
   function wsOpen() { if (WS.main && WS.main.readyState === 1) return WS.main; return WS.sockets.find((s) => s.readyState === 1) || null; }
   function sendGame(payload) { if (WS.off) return false; const ws = wsOpen(); if (!ws) return false; try { ws.send(JSON.stringify(wsBuild(payload))); return true; } catch { return false; } }
+  // Server clock (own copy, so the weather timer does not depend on Garden Companion)
+  const SC = { anchor: null };
+  function noteServerClock(data) {
+    if (typeof data !== "string") return; const key = '"publishedAtServerMs":', at = data.indexOf(key); if (at === -1) return;
+    let end = at + key.length; while (end < data.length) { const c = data.charCodeAt(end); if (c < 48 || c > 57) break; end++; }
+    const serverMs = Number(data.slice(at + key.length, end)); if (!Number.isFinite(serverMs) || serverMs <= 0) return;
+    const clientMs = Date.now(); if (data.includes('"selfPlayerId"') || !SC.anchor || serverMs > SC.anchor.serverMs + clientMs - SC.anchor.clientMs) SC.anchor = { clientMs, serverMs };
+  }
   function installWsHook() {
     try {
       if (!NativeWS || !NativeWS.prototype) return;
@@ -80,7 +88,7 @@
         ws.addEventListener("open", () => { setTimeout(() => { if (ws.readyState === 1 && !WS.main) WS.main = ws; }, 800); });
         ws.addEventListener("message", (ev) => {
           const d = ev.data;
-          if (typeof d === "string") { if (d.indexOf('"Welcome"') === -1) return; try { const j = JSON.parse(d); if (j?.type === "Welcome") { wsSeed(j.executedCommandSequence); WS.main = ws; } } catch {} return; }
+          if (typeof d === "string") { noteServerClock(d); if (d.indexOf('"Welcome"') === -1) return; try { const j = JSON.parse(d); if (j?.type === "Welcome") { wsSeed(j.executedCommandSequence); WS.main = ws; } } catch {} return; }
           if (WS.welcomed) return;
           const read = d instanceof Blob ? d.text() : d instanceof ArrayBuffer ? Promise.resolve(new TextDecoder().decode(d)) : null;
           read?.then((txt) => { if (txt.indexOf('"Welcome"') === -1) return; try { const j = JSON.parse(txt); if (j?.type === "Welcome") { wsSeed(j.executedCommandSequence); WS.main = ws; } } catch {} }).catch(() => {});
@@ -465,10 +473,22 @@
   let roomGame = null, seenWeather, seenAt = 0, weatherEl = null, weatherTimer = null, roomHooked = false;
   function hookRoom() {
     if (roomHooked) return true; const conn = PW.MagicCircle_RoomConnection; if (typeof conn?.subscribeToPatches !== "function") return false;
-    try { conn.subscribeToPatches((_patches, full) => { roomGame = full?.child?.data || null; }); roomHooked = true; } catch { return false; }
+    try { conn.subscribeToPatches((_patches, full) => { roomGame = full?.child?.data || roomGame; }); roomHooked = true; } catch { return false; }
     return true;
   }
-  function gameNow() { try { const o = PW.__gardenCompanionForecastTrace?.()?.serverClockOffsetMs; return Date.now() + (Number.isFinite(o) ? o : 0); } catch { return Date.now(); } }
+  let pulling = false;
+  async function pullGame() {   // read the live room state straight from the game's store (roomPublicationAtom first, then stateAtom)
+    if (pulling) return; pulling = true;
+    try {
+      const s = await getStore(); if (!s) return;
+      for (const label of ["roomPublicationAtom", "stateAtom"]) {
+        const atom = findAtom(label); if (!atom) continue;
+        const v = await readAtom(s, atom), st = label === "roomPublicationAtom" ? v?.state : v;
+        if (st?.child?.data) { roomGame = st.child.data; return; }
+      }
+    } catch {} finally { pulling = false; }
+  }
+  function gameNow() { if (SC.anchor) return SC.anchor.serverMs + Date.now() - SC.anchor.clientMs; try { const o = PW.__gardenCompanionForecastTrace?.()?.serverClockOffsetMs; return Date.now() + (Number.isFinite(o) ? o : 0); } catch { return Date.now(); } }
   const wName = (id) => W_NAME[id] || pretty(id) || "Clear";
   function wIcon(id) { const sprite = PW.__gardenCompanionWeatherSprites?.[id]; return sprite ? `<img src="${esc(sprite)}" alt="">` : (W_EMOJI[id] || "☀️"); }
   function fmtClock(ms) { const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60; return h ? `${h}:${pad2(m)}:${pad2(x)}` : `${m}:${pad2(x)}`; }
@@ -1945,6 +1965,7 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
   function install() {
     installDock(); mountWins(); startAlerts(); void loadLiveData();
     if (!hookRoom()) { const t = setInterval(() => { if (hookRoom()) clearInterval(t); }, 1000); }
+    void pullGame(); setInterval(() => { void pullGame(); }, 1000);
     document.addEventListener("keydown", (event) => {
       const target = event.target; if (target?.isContentEditable || /^(input|textarea|select)$/i.test(target?.tagName || "")) return;
       if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || !/^Key[OCDRNL]$/.test(event.code)) return;
