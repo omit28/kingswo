@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.4.2
+// @version      3.4.3
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -21,7 +21,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.4.2", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.4.3", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const ALERT_KEY = "mg-king-alerts-v1";
@@ -122,6 +122,7 @@
     { id: "calc", win: "calc", icon: "calc", label: "Calculator", title: "Crop Calculator — Alt + C" },
     { id: "room", win: "room", icon: "room", label: "Room", title: "Room — Alt + R" },
     { id: "alerts", win: "alerts", icon: "bell", label: "Alerts", title: "Alerts — Alt + N\nRight-click: turn on / off", lamp: ALERT_KEY },
+    { id: "locker", win: "locker", icon: "lock", label: "Locker", title: "Locker — Alt + L" },
     { id: "buy", code: "KeyB", icon: "cart", label: "Buy", title: "Auto Buy — Alt + B" },
     { id: "sell", code: "KeyG", icon: "coin", label: "Sell", title: "Auto Sell — Alt + G" }
   ];
@@ -326,7 +327,7 @@
 #${DOCK_ID}[data-mini="true"]{padding:${U(6)} ${U(8)}}
 #${DOCK_ID}[data-mini="true"] .gd-head{padding:0}
 #${DOCK_ID}[data-mini="true"] .gd-grid,#${DOCK_ID}[data-mini="true"] .gd-pop{display:none}
-#${DOCK_ID}[data-mini="true"] .gd-lamps{display:flex}
+#${DOCK_ID}[data-mini="true"] .gd-lamps{display:none}
 #${DOCK_ID}[data-mini="true"] [data-min] svg{transform:rotate(-90deg)}
 #${DOCK_ID} .gd-pop{display:none;position:absolute;top:0;width:236px;max-height:calc(100vh - 16px);overflow-y:auto;padding:12px;border-radius:16px;background:rgba(28,30,29,.98);border:1px solid rgba(255,255,255,.12);box-shadow:0 14px 34px rgba(0,0,0,.55);font:600 12px "Trebuchet MS",system-ui,sans-serif;color:#dfe7e2;scrollbar-width:thin}
 #${DOCK_ID} .gd-pop[data-open="true"]{display:block}
@@ -1402,6 +1403,331 @@
   createWin({ id: "calc", title: "Crop Calculator", icon: "calc", accent: ["#f0c35a", "#f6e3a1"], w: 640, h: 600, tabs: [{ id: "c", label: "Crops", render: renderCalc }] });
   createWin({ id: "alerts", title: "Alerts", icon: "bell", accent: ["#f6a04a", "#ffd59a"], w: 560, h: 580, every: 1000, tabs: [{ id: "shops", label: "Shop", render: alertsShops }, { id: "weather", label: "Weather", render: alertsWeather }, { id: "pets", label: "Pets", render: alertsPets }, { id: "sound", label: "Sound", render: alertsSound }] });
 
+  // =====================================================================================================
+  //  Locker (ported from Arie's mod): harvest locker with per-crop rules, plus egg / decor / friend-bonus
+  //  and pet-sale locks. Self-contained block: it adds a Locker window, a dock button and an outgoing-command
+  //  guard, and does not change how any existing feature works.
+  // =====================================================================================================
+  Object.assign(ICONS, { lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>' });
+  const LK_KEY = "mg-king-locker-v1", LKR_KEY = "mg-king-locker-restrict-v1", LK_SEL_KEY = "mg-king-locker-crop-v1";
+  const LK_EPS = 1e-4, LK_FB_STEP = 10, LK_FB_MAX = 50, LK_NO_WEATHER = "NoWeatherEffect";
+  const LK_RARITIES = ["Common", "Uncommon", "Rare", "Legendary", "Mythical", "Divine", "Celestial"];
+  const LK_TAGS = [[LK_NO_WEATHER, "No weather effect"], ["Wet", "Wet"], ["Chilled", "Chilled"], ["Frozen", "Frozen"], ["Thunderstruck", "Thunderstruck"], ["Thundercharged", "Thundercharged"], ["Dawnlit", "Dawnlit"], ["Dawnbound", "Dawnbound"], ["Amberlit", "Amberlit"], ["Amberbound", "Amberbound"]];
+  const LK_GROUPS = { condition: ["Wet", "Chilled", "Frozen", "Thunderstruck", "Thundercharged"], lighting: ["Dawnlit", "Amberlit", "Dawnbound", "Amberbound"] };
+  const lkGroupOf = (t) => Object.keys(LK_GROUPS).find((g) => LK_GROUPS[g].includes(t));
+  const lkOffered = (t) => LK_TAGS.some((x) => x[0] === t);
+  const lkUniq = (a) => (Array.isArray(a) ? [...new Set(a.map((x) => String(x || "")).filter(Boolean))] : []);
+  const lkClone = (o) => JSON.parse(JSON.stringify(o));
+  const lkSize = (raw, fb) => { const n = Number(raw); return Number.isFinite(n) ? clamp(Math.round(n), CROP_MIN, CROP_MAX) : fb; };
+  const lkDefaults = () => ({ minScalePct: CROP_MIN, maxScalePct: CROP_MAX, scaleLockMode: "NONE", lockMode: "LOCK", avoidNormal: false, visualMutations: [], weatherMode: "ANY", weatherSelected: [], weatherRecipes: [] });
+  function lkNormRange(mode, a, b) {
+    let min = lkSize(a, CROP_MIN), max = lkSize(b, CROP_MAX);
+    if (mode === "RANGE") { max = Math.max(CROP_MIN + 1, max); if (max <= min) { if (min >= CROP_MAX - 1) { min = CROP_MAX - 1; max = CROP_MAX; } else max = min + 1; } }
+    return { min, max };
+  }
+  function lkRecipe(tags) { const seen = new Set(); return tags.filter((t) => { if (!lkOffered(t)) return false; const g = lkGroupOf(t); if (!g) return true; if (seen.has(g)) return false; seen.add(g); return true; }); }
+  function lkSanitize(raw) {
+    const mode = ["MINIMUM", "MAXIMUM", "RANGE", "NONE"].includes(raw?.scaleLockMode) ? raw.scaleLockMode : "NONE", { min, max } = lkNormRange(mode, raw?.minScalePct, raw?.maxScalePct), wm = raw?.weatherMode;
+    return { minScalePct: min, maxScalePct: max, scaleLockMode: mode, lockMode: raw?.lockMode === "ALLOW" ? "ALLOW" : "LOCK", avoidNormal: raw?.avoidNormal === true, visualMutations: lkUniq(raw?.visualMutations).filter((m) => m === "Gold" || m === "Rainbow"), weatherMode: wm === "ALL" || wm === "RECIPES" ? wm : "ANY", weatherSelected: lkUniq(raw?.weatherSelected).filter(lkOffered), weatherRecipes: Array.isArray(raw?.weatherRecipes) ? raw.weatherRecipes.map((r) => lkRecipe(lkUniq(r))).filter((r) => r.length) : [] };
+  }
+  const LKS = (() => {
+    const raw = readJson(LK_KEY), st = { enabled: false, settings: lkDefaults(), overrides: {} };
+    if (raw && typeof raw === "object") {
+      st.enabled = raw.enabled === true; st.settings = lkSanitize(raw.settings);
+      if (raw.overrides && typeof raw.overrides === "object") for (const [k, v] of Object.entries(raw.overrides)) if (k) st.overrides[k] = { enabled: v?.enabled === true, settings: lkSanitize(v?.settings) };
+    }
+    return st;
+  })();
+  const LKR_PETS = { enabled: false, protectGold: true, protectRainbow: true, protectMaxStr: true, maxStrThreshold: 95, protectedRarities: [] };
+  const LKR = (() => {
+    const raw = readJson(LKR_KEY) || {}, p = raw.sellAllPets && typeof raw.sellAllPets === "object" ? raw.sellAllPets : {}, eggLocks = {};
+    if (raw.eggLocks && typeof raw.eggLocks === "object") for (const [k, v] of Object.entries(raw.eggLocks)) if (k && v === true) eggLocks[k] = true;
+    const th = Number(p.maxStrThreshold);
+    return { minRequiredPlayers: clamp(Math.round(Number(raw.minRequiredPlayers)) || 1, 1, 6), eggLocks, decorPickupLocked: raw.decorPickupLocked === true,
+      sellAllPets: { enabled: p.enabled === true, protectGold: p.protectGold !== false, protectRainbow: p.protectRainbow !== false, protectMaxStr: p.protectMaxStr !== false, maxStrThreshold: Number.isFinite(th) ? clamp(Math.round(th), 0, 100) : LKR_PETS.maxStrThreshold, protectedRarities: lkUniq(p.protectedRarities).filter((r) => LK_RARITIES.includes(r)) } };
+  })();
+  const lkActive = () => LKS.enabled || LKR.minRequiredPlayers > 1 || LKR.decorPickupLocked || LKR.sellAllPets.enabled || Object.values(LKR.eggLocks).some(Boolean);
+  const lkSave = () => { writeJson(LK_KEY, LKS); lkEnsure(); };
+  const lkrSave = () => { writeJson(LKR_KEY, LKR); lkEnsure(); };
+
+  // ---- live game state the rules need (cached, because outgoing commands must be judged instantly) ----
+  const LKD = { garden: null, obj: null, slotId: null, mult: null, players: null, inv: null, started: false };
+  async function lkFollow(labels, cb) {
+    const s = await getStore(); if (!s) return; let atom = null;
+    for (let i = 0; i < 1200 && !atom; i++) { for (const l of labels) { atom = findAtom(l); if (atom) break; } if (!atom) await sleep(500); }
+    if (!atom) return; const push = async () => { try { cb(await readAtom(s, atom)); } catch {} };
+    try { s.sub(atom, push); } catch {} await push();
+  }
+  function lkWatch() {
+    if (LKD.started) return; LKD.started = true;
+    void lkFollow(["myDataAtom"], (v) => { LKD.garden = v?.garden ?? null; });
+    void lkFollow(["myCurrentGardenObjectAtom"], (v) => { LKD.obj = v ?? null; });
+    void lkFollow(["selectedCropSlotIdAtom", "myCurrentGrowSlotIdAtom", "mySelectedSlotIdAtom"], (v) => { LKD.slotId = v !== null && v !== undefined && Number.isFinite(Number(v)) ? Number(v) : null; });
+    void lkFollow(["friendBonusMultiplierAtom"], (v) => { LKD.mult = v; });
+    void lkFollow(["numPlayersAtom"], (v) => { LKD.players = v; });
+    void lkFollow(["myInventoryAtom"], (v) => { LKD.inv = v; });
+  }
+  function lkEnsure() { if (lkActive()) lkWatch(); }
+  const lkFbFromMult = (raw) => { const n = Number(raw); if (!Number.isFinite(n)) return null; if (n <= 0) return 0; if (n <= 2) return clamp(Math.round((n - 1) * 100), 0, LK_FB_MAX); return (clamp(Math.round(n), 1, 6) - 1) * 10; };
+  const lkFbFromPlayers = (raw) => { const n = Number(raw); return Number.isFinite(n) ? (clamp(Math.round(n), 1, 6) - 1) * 10 : null; };
+  const lkFbNow = () => lkFbFromMult(LKD.mult) ?? lkFbFromPlayers(LKD.players);
+  const lkRequiredPct = () => (LKR.minRequiredPlayers - 1) * 10;
+
+  // ---- the rules ----
+  const lkSeedOf = (o) => { if (!o || typeof o !== "object") return null; for (const k of ["seedKey", "species", "seedSpecies", "plantSpecies", "cropSpecies", "speciesId"]) if (typeof o[k] === "string" && o[k]) return o[k]; return null; };
+  const lkCropOf = (slot, fallbackKey) => ({ seedKey: lkSeedOf(slot) || fallbackKey || null, sizePercent: readCropSize(slot) ?? CROP_MAX, mutations: Array.isArray(slot.mutations) ? slot.mutations.map(String) : [] });
+  function lkHarvestOk(S, crop) {
+    const muts = (crop.mutations || []).map(normMut).filter(Boolean), weather = muts.filter((t) => t !== "Gold" && t !== "Rainbow");
+    const carries = (t) => { const tag = normMut(t); if (!tag) return false; return tag === LK_NO_WEATHER ? weather.length === 0 : weather.includes(tag); };
+    let size = { has: false, m: false };
+    if (S.scaleLockMode !== "NONE") { const { min, max } = lkNormRange(S.scaleLockMode, S.minScalePct, S.maxScalePct), above = crop.sizePercent + LK_EPS >= min, below = crop.sizePercent - LK_EPS <= max; size = { has: true, m: S.scaleLockMode === "MINIMUM" ? above : S.scaleLockMode === "MAXIMUM" ? below : above && below }; }
+    const hasGold = muts.includes("Gold"), hasRainbow = muts.includes("Rainbow"), gold = S.visualMutations.includes("Gold"), rainbow = S.visualMutations.includes("Rainbow");
+    const color = { has: S.avoidNormal || gold || rainbow, m: (S.avoidNormal && !hasGold && !hasRainbow) || (gold && hasGold) || (rainbow && hasRainbow) };
+    let wx;
+    if (S.weatherMode === "RECIPES") { const recipes = S.weatherRecipes.filter((r) => Array.isArray(r) && r.length); wx = { has: S.weatherRecipes.length > 0, m: recipes.some((r) => r.every(carries)) }; }
+    else if (!S.weatherSelected.length) wx = { has: false, m: false };
+    else wx = { has: true, m: S.weatherMode === "ALL" ? S.weatherSelected.every(carries) : S.weatherSelected.some(carries) };
+    const filters = [size, color, wx];
+    return !(S.lockMode === "ALLOW" ? filters.some((f) => f.has && !f.m) : filters.some((f) => f.m));
+  }
+  const lkSettingsFor = (key) => { const o = key ? LKS.overrides[key] : null; return o?.enabled ? o.settings : LKS.settings; };
+  const lkAllows = (crop) => (LKS.enabled ? lkHarvestOk(lkSettingsFor(crop.seedKey), crop) : true);
+  function lkSelectedSlot() {
+    const o = LKD.obj; if (!o || o.objectType !== "plant" || !Array.isArray(o.slots)) return null;
+    const slots = o.slots.filter((s) => s && typeof s === "object"); if (!slots.length) return null;
+    const idOf = (s) => (Number.isFinite(s.slotId) ? s.slotId : 0), sorted = slots.slice().sort((a, b) => idOf(a) - idOf(b)), want = LKD.slotId;
+    if (want != null) return slots.find((s) => s.slotId === want) || sorted.find((s) => idOf(s) >= want) || sorted[0];
+    return sorted[0];
+  }
+  function lkCurrentVerdict() { if (!LKS.enabled) return null; const slot = lkSelectedSlot(); if (!slot) return null; try { return lkAllows(lkCropOf(slot, lkSeedOf(LKD.obj))); } catch { return null; } }
+  function lkCheckHarvest(c) {
+    if (!LKS.enabled) return null;
+    const { slot, slotsIndex } = c; if (!Number.isInteger(slot) || !Number.isInteger(slotsIndex)) return null;
+    const cur = () => (lkCurrentVerdict() === false ? "drop" : null), tile = LKD.garden?.tileObjects?.[String(slot)];
+    if (!tile || typeof tile !== "object" || tile.objectType !== "plant") return cur();
+    const list = Array.isArray(tile.slots) ? tile.slots : [], cs = list.find((s) => s && typeof s === "object" && s.slotId === slotsIndex) ?? list[slotsIndex];
+    if (!cs || typeof cs !== "object") return cur();
+    let ok = true; try { ok = lkAllows(lkCropOf(cs, lkSeedOf(tile))); } catch {}
+    return ok ? null : "drop";
+  }
+  const lkNote = (() => { const last = {}; return (key, title, detail) => { const t = Date.now(); if (t - (last[key] || 0) < 1500) return; last[key] = t; try { toast(title, detail, { kind: "warn", emoji: "🔒" }); } catch {} }; })();
+  function lkPetReasons(item) {
+    const r = LKR.sellAllPets, out = [], muts = (Array.isArray(item.mutations) ? item.mutations : []).map((m) => String(m).toLowerCase());
+    if (r.protectGold && muts.includes("gold")) out.push("Mutation: Gold");
+    if (r.protectRainbow && muts.includes("rainbow")) out.push("Mutation: Rainbow");
+    const info = normPet(item, "");
+    if (r.protectMaxStr && info && info.maxStrength >= r.maxStrThreshold) out.push(`Max STR: ${Math.floor(info.maxStrength)}`);
+    const rarity = KD.pets[String(item.petSpecies || "")]?.r; if (rarity && r.protectedRarities.includes(rarity)) out.push(`Rarity: ${rarity}`);
+    return out;
+  }
+  function lkVerdict(c) {
+    switch (c.type) {
+      case "HarvestCrop": return lkCheckHarvest(c);
+      case "PickupDecor": return LKR.decorPickupLocked ? "drop" : null;
+      case "HatchEgg": { const o = LKD.obj, id = o && o.objectType === "egg" && typeof o.eggId === "string" ? o.eggId : null; if (!id || !LKR.eggLocks[id]) return null; lkNote("egg", "Egg hatch locker", `Hatching locked for ${KD.eggs[id]?.n || id}`); return "drop"; }
+      case "SellAllCrops": { const need = lkRequiredPct(); if (need <= 0) return null; const cur = lkFbNow(); if (Number.isFinite(cur) && clamp(Math.round(cur), 0, LK_FB_MAX) + LK_EPS >= need) return null; lkNote("fb", "Friend bonus locker", `Require at least ${need}% friend bonus`); return "drop"; }
+      case "SellPet": { if (!LKR.sellAllPets.enabled) return null; const item = (Array.isArray(LKD.inv?.items) ? LKD.inv.items : []).find((i) => i && i.id === c.itemId); if (!item || item.itemType !== "Pet") return null; const why = lkPetReasons(item); if (!why.length) return null; lkNote("pet", "Pet sale locked", why.join(" · ")); return "drop"; }
+    }
+    return null;
+  }
+  (function lkInstallGuard() {
+    try {
+      const proto = NativeWS?.prototype; if (!proto || proto.__kxLockPatched) return; const original = proto.send;
+      proto.send = function (data, ...rest) {
+        try {
+          if (typeof data === "string" && data.indexOf('"QuinoaCommand"') !== -1 && lkActive()) {
+            const p = JSON.parse(data);
+            if (p?.type === "QuinoaCommand" && p.command && typeof p.command === "object" && !(typeof p.requestId === "string" && WS.own.has(p.requestId)) && lkVerdict(p.command) === "drop") return;
+          }
+        } catch {}
+        return original.call(this, data, ...rest);
+      };
+      proto.__kxLockPatched = true;
+    } catch (error) { console.warn("[King's Mod] locker guard failed", error); }
+  })();
+  lkEnsure();
+  setInterval(() => {   // small red chip while the thing you are looking at is locked
+    if (!LKD.started || !document.body) return; let what = null;
+    try { const o = LKD.obj; if (o) { if (o.objectType === "egg" && typeof o.eggId === "string" && LKR.eggLocks[o.eggId]) what = `${KD.eggs[o.eggId]?.n || o.eggId} hatching locked`; else if (o.objectType === "decor" && LKR.decorPickupLocked) what = "Decor pickup locked"; else if (o.objectType === "plant" && lkCurrentVerdict() === false) what = "Harvest locked"; } } catch {}
+    let chip = document.getElementById("kx-locker-chip");
+    if (!what) { chip?.remove(); return; }
+    if (!chip) { chip = h("div"); chip.id = "kx-locker-chip"; document.body.append(chip); }
+    const text = `🔒 ${what}`; if (chip.textContent !== text) chip.textContent = text;
+  }, 400);
+
+  // ---- the Locker window ----
+  function lkSwitch(on, onChange, label) {
+    const w = h("label", "kl-sw"), i = h("input"); i.type = "checkbox"; i.checked = !!on; if (label) i.setAttribute("aria-label", label); w.append(i, h("i"));
+    i.onchange = () => onChange(i.checked); w.setChecked = (v) => { i.checked = !!v; }; w.setDisabled = (v) => { i.disabled = !!v; }; return w;
+  }
+  function lkCard(title, o = {}) {
+    const root = h("section", "kl-card"), head = h("div", "kl-ch"), txt = h("div"), t = h("b"), sub = h("small"), body = h("div", "kl-cb");
+    t.textContent = title; const setSub = (s) => { sub.textContent = s || ""; sub.hidden = !s; }; setSub(o.subtitle); txt.append(t, sub); head.append(txt); if (o.control) head.append(o.control); root.append(head, body);
+    return { root, head, body, setSubtitle: setSub };
+  }
+  function lkSlider(label, lo, hi, step, fmt, onLive, onCommit) {
+    const line = h("div", "kl-line"), name = h("span", "kl-ln"), r = h("input", "kx-range"), v = h("b"); name.textContent = label; r.type = "range"; r.min = lo; r.max = hi; r.step = step; r.setAttribute("aria-label", label); line.append(name, r, v);
+    const set = (x) => { r.value = String(x); v.textContent = fmt(Number(r.value)); }; r.oninput = () => { v.textContent = fmt(Number(r.value)); onLive?.(Number(r.value)); }; r.onchange = () => onCommit?.(Number(r.value));
+    return { line, set };
+  }
+  function lkTile(tag, label, dense, onToggle) {
+    const b = h("button", "kl-tile"); b.type = "button"; b.dataset.on = "false"; b.dataset.tag = tag;
+    b.append(tag === LK_NO_WEATHER ? h("span", "kl-ti", "🚫") : spr(SPR.mut(KD.mut[tag] ? tag : (MUT_ID[tag] || tag)), dense ? 26 : 34, EMOJI.mut), h("span", "kl-tl", esc(label)));
+    b.onclick = () => { const on = b.dataset.on !== "true"; b.dataset.on = String(on); onToggle(on); }; b.setChecked = (v) => { b.dataset.on = String(!!v); }; return b;
+  }
+  function lkRecipes(S, onChange) {
+    const root = h("div", "kl-recipes"), head = h("div", "kl-rhead"), title = h("div", "kl-hint"), add = h("button", "kx-btn", "Add recipe"), list = h("div", "kl-rlist"); add.type = "button"; head.append(title, add); root.append(head, list);
+    let editing = null, draft = [];
+    const summary = (tags) => { const box = h("div", "kl-tags"); const picked = LK_TAGS.filter(([k]) => tags.includes(k)); for (const [k, l] of picked) { const t = h("span", "kl-tag"); t.append(k === LK_NO_WEATHER ? h("i", "", "🚫") : spr(SPR.mut(KD.mut[k] ? k : (MUT_ID[k] || k)), 16, EMOJI.mut), h("span", "", esc(l))); box.append(t); } if (!picked.length) box.append(h("div", "kl-hint", "Pick at least one effect below.")); return box; };
+    const startEdit = (i) => { editing = i; draft = lkRecipe((S.weatherRecipes[i] || []).slice()); paint(); };
+    const stop = () => { editing = null; draft = []; paint(); };
+    const commit = () => { if (editing === null) return; const r = lkRecipe(draft.slice()); if (r.length) { if (editing >= S.weatherRecipes.length) S.weatherRecipes.push(r); else S.weatherRecipes[editing] = r; } stop(); onChange(); };
+    const remove = (i) => { if (i < S.weatherRecipes.length) S.weatherRecipes.splice(i, 1); if (editing !== null) { if (i === editing) { editing = null; draft = []; } else if (i < editing) editing -= 1; } paint(); onChange(); };
+    function editRow(i) {
+      const row = h("div", "kl-recipe is-edit"), sumBox = h("div"), grid = h("div", "kl-tiles dense"), tiles = new Map(); sumBox.append(summary(draft));
+      for (const [k, l] of LK_TAGS) { const tile = lkTile(k, l, true, (on) => { if (on) { const g = lkGroupOf(k); if (g) draft = draft.filter((x) => { if (x !== k && lkGroupOf(x) === g) { tiles.get(x)?.setChecked(false); return false; } return true; }); if (!draft.includes(k)) draft.push(k); } else draft = draft.filter((x) => x !== k); sumBox.replaceChildren(summary(draft)); }); tile.setChecked(draft.includes(k)); tiles.set(k, tile); grid.append(tile); }
+      const act = h("div", "kl-ract"); if (i < S.weatherRecipes.length) { const d = h("button", "kx-btn ghost", "Delete"); d.type = "button"; d.onclick = () => remove(i); act.append(d); }
+      const sp = h("span", "kl-sp"), c = h("button", "kx-btn ghost", "Cancel"), s = h("button", "kx-btn", "Save"); c.type = s.type = "button"; c.onclick = stop; s.onclick = commit; act.append(sp, c, s); row.append(sumBox, grid, act); return row;
+    }
+    function savedRow(r, i) { const row = h("div", "kl-recipe"), act = h("div", "kl-ract"), e = h("button", "kx-btn ghost", "Edit"), d = h("button", "kx-btn ghost", "Delete"); e.type = d.type = "button"; e.onclick = () => startEdit(i); d.onclick = () => remove(i); act.append(e, d); row.append(summary(r), act); return row; }
+    function paint() {
+      title.textContent = `A crop with every effect of a recipe is ${S.lockMode === "ALLOW" ? "allowed" : "locked"}.`; add.disabled = editing !== null; list.replaceChildren();
+      S.weatherRecipes.forEach((r, i) => list.append(i === editing ? editRow(i) : savedRow(r, i)));
+      if (editing !== null && editing === S.weatherRecipes.length) list.append(editRow(editing));
+      if (!list.childElementCount) list.append(h("div", "kl-empty", "No recipes yet. Add one with the button above."));
+    }
+    add.onclick = () => startEdit(S.weatherRecipes.length); paint(); return { root, refresh: paint };
+  }
+  function lkForm(S, onChange) {
+    const root = h("div", "kl-form"), modeC = lkCard("Mode"), sizeC = lkCard("Size"), colorC = lkCard("Colour"), wxC = lkCard("Weather");
+    // Mode
+    const modeHint = h("div", "kl-hint"), warn = h("div", "kl-warn"); warn.hidden = true;
+    const modeSeg = segmented([{ label: "Lock", value: "LOCK" }, { label: "Allow", value: "ALLOW" }], S.lockMode, (v) => { if (v === S.lockMode) return; S.lockMode = v; showMode(); recipes.refresh(); onChange(); });
+    modeC.body.append(modeSeg, modeHint);
+    const covers = () => { if (S.lockMode !== "LOCK") return false; switch (S.scaleLockMode) { case "RANGE": return S.minScalePct <= CROP_MIN && S.maxScalePct >= CROP_MAX; case "MINIMUM": return S.minScalePct <= CROP_MIN; case "MAXIMUM": return S.maxScalePct >= CROP_MAX; default: return false; } };
+    const showWarn = () => { const b = covers(); warn.hidden = !b; warn.textContent = b ? "This size filter covers every size, so nothing can be harvested. Pick None to stop filtering by size." : ""; };
+    const showMode = () => { modeSeg.set(S.lockMode); modeHint.textContent = S.lockMode === "ALLOW" ? "Only crops matching every active filter type can be harvested." : "Crops matching any active filter can't be harvested."; showWarn(); };
+    // Size
+    const noSize = h("div", "kl-hint", "Every size passes."), num = (x) => String(x);
+    const scaleSeg = segmented([{ label: "None", value: "NONE" }, { label: "Min", value: "MINIMUM" }, { label: "Max", value: "MAXIMUM" }, { label: "Range", value: "RANGE" }], S.scaleLockMode, (v) => { if (v === S.scaleLockMode) return; S.scaleLockMode = v; if (v === "RANGE") { const n = lkNormRange("RANGE", S.minScalePct, S.maxScalePct); S.minScalePct = n.min; S.maxScalePct = n.max; } showScale(); onChange(); });
+    const minS = lkSlider("Minimum", CROP_MIN, CROP_MAX, 1, num, (v) => { S.minScalePct = v; showWarn(); }, () => onChange());
+    const maxS = lkSlider("Maximum", CROP_MIN, CROP_MAX, 1, num, (v) => { S.maxScalePct = v; showWarn(); }, () => onChange());
+    const rangeLive = (which, v) => { if (which === "min") S.minScalePct = v; else S.maxScalePct = v; const n = lkNormRange("RANGE", S.minScalePct, S.maxScalePct); S.minScalePct = n.min; S.maxScalePct = n.max; fromS.set(n.min); toS.set(n.max); showWarn(); };
+    const fromS = lkSlider("From", CROP_MIN, CROP_MAX, 1, num, (v) => rangeLive("min", v), () => onChange());
+    const toS = lkSlider("To", CROP_MIN, CROP_MAX, 1, num, (v) => rangeLive("max", v), () => onChange());
+    const showScale = () => { const m = S.scaleLockMode; scaleSeg.set(m); noSize.hidden = m !== "NONE"; minS.line.hidden = m !== "MINIMUM"; maxS.line.hidden = m !== "MAXIMUM"; fromS.line.hidden = toS.line.hidden = m !== "RANGE"; minS.set(S.minScalePct); maxS.set(S.maxScalePct); fromS.set(S.minScalePct); toS.set(S.maxScalePct); showWarn(); };
+    sizeC.body.append(scaleSeg, noSize, minS.line, maxS.line, fromS.line, toS.line, warn);
+    // Colour
+    const cbtns = [], colors = h("div", "kl-colors");
+    const toggleVis = (t) => { const i = S.visualMutations.indexOf(t); if (i >= 0) S.visualMutations.splice(i, 1); else S.visualMutations.push(t); };
+    const cbtn = (label, cls, isOn, toggle) => { const b = h("button", `kx-btn kl-color ${cls}`, esc(label)); b.type = "button"; b.onclick = () => { toggle(); showColors(); onChange(); }; cbtns.push([b, isOn]); return b; };
+    const showColors = () => { for (const [b, on] of cbtns) { b.dataset.on = String(on()); b.setAttribute("aria-pressed", String(on())); } };
+    colors.append(cbtn("Normal", "normal", () => S.avoidNormal, () => { S.avoidNormal = !S.avoidNormal; }), cbtn("Gold", "gold", () => S.visualMutations.includes("Gold"), () => toggleVis("Gold")), cbtn("Rainbow", "rainbow", () => S.visualMutations.includes("Rainbow"), () => toggleVis("Rainbow")));
+    colorC.body.append(colors);
+    // Weather
+    const wxHint = h("div", "kl-hint"), HINTS = { ANY: "Matches crops with any of the picked effects.", ALL: "Matches crops with every picked effect.", RECIPES: "" };
+    const wxSeg = segmented([{ label: "Any", value: "ANY" }, { label: "All", value: "ALL" }, { label: "Recipes", value: "RECIPES" }], S.weatherMode, (v) => { if (v === S.weatherMode) return; S.weatherMode = v; showWx(); onChange(); });
+    const grid = h("div", "kl-tiles"), tiles = LK_TAGS.map(([k, l]) => { const t = lkTile(k, l, false, (on) => { const i = S.weatherSelected.indexOf(k); if (on && i < 0) S.weatherSelected.push(k); else if (!on && i >= 0) S.weatherSelected.splice(i, 1); onChange(); }); grid.append(t); return t; });
+    const recipes = lkRecipes(S, onChange);
+    const showWx = () => { wxSeg.set(S.weatherMode); wxHint.textContent = HINTS[S.weatherMode] || ""; wxHint.hidden = !wxHint.textContent; const rm = S.weatherMode === "RECIPES"; grid.hidden = rm; recipes.root.hidden = !rm; };
+    wxC.body.append(wxSeg, wxHint, grid, recipes.root);
+    root.append(modeC.root, sizeC.root, colorC.root, wxC.root);
+    showMode(); showScale(); showColors(); tiles.forEach((t) => t.setChecked(S.weatherSelected.includes(t.dataset.tag))); showWx(); recipes.refresh();
+    return { root, setDisabled(d) { root.classList.toggle("kl-dis", d); root.inert = d; } };
+  }
+  function lkGeneral(body, win) {
+    const root = h("div", "kl-tab"), sw = lkSwitch(LKS.enabled, (on) => { LKS.enabled = on; lkSave(); upd(); }, "Harvest locker"), hd = lkCard("Harvest locker", { control: sw }), form = lkForm(LKS.settings, () => lkSave());
+    hd.root.classList.add("kl-hero"); root.append(hd.root, form.root); body.append(root);
+    const upd = () => { sw.setChecked(LKS.enabled); hd.setSubtitle(LKS.enabled ? "On. Harvests follow the rules below." : "Off. Turn it on to apply the rules below."); form.setDisabled(!LKS.enabled); win.setSub(LKS.enabled ? "Harvest locker is on" : "Harvest locker is off"); };
+    upd(); return {};
+  }
+  function lkPerCrop(body, win) {
+    const split = h("div", "kl-split"), lw = h("div", "kl-lw"), search = h("input", "kx-search"), crops = h("div", "kl-crops"), detail = h("div", "kl-detail"), keys = Object.keys(KD.crops);
+    search.type = "search"; search.placeholder = "Search crops"; search.setAttribute("aria-label", "Search crops"); lw.append(search, crops); split.append(lw, detail); body.append(split); win.setSub("Give a crop rules of its own");
+    let sel = readJson(LK_SEL_KEY); if (!keys.includes(sel)) sel = keys[0];
+    const paintList = () => {
+      const keep = crops.scrollTop, left = crops.scrollLeft, t = search.value.trim().toLowerCase(); crops.replaceChildren(); let n = 0;
+      for (const k of keys) { const c = KD.crops[k]; if (t && !c.n.toLowerCase().includes(t) && !k.toLowerCase().includes(t)) continue; n++; const b = h("button", "kl-crop"); b.type = "button"; b.dataset.on = String(k === sel); b.append(spr(SPR.seed(k), 24, EMOJI.seed), h("span", "kl-cn", esc(c.n))); if (LKS.overrides[k]?.enabled) b.append(h("em", "kl-on", "On")); b.onclick = () => { sel = k; writeJson(LK_SEL_KEY, sel); paintList(); paintDetail(); }; crops.append(b); }
+      if (!n) crops.append(h("div", "kl-hint", "No crops found.")); crops.scrollTop = keep; crops.scrollLeft = left;
+    };
+    const paintDetail = () => {
+      const k = sel, c = KD.crops[k], ov = LKS.overrides[k], entry = ov || { enabled: false, settings: lkDefaults() };
+      const sw = lkSwitch(entry.enabled, (on) => { let o = LKS.overrides[k]; if (!o) o = LKS.overrides[k] = { enabled: false, settings: lkClone(LKS.settings) }; o.enabled = on; lkSave(); paintList(); paintDetail(); }, `Own rules for ${c.n}`);
+      const hd = lkCard(c.n, { subtitle: entry.enabled ? "Uses its own rules below." : "Follows the General tab.", control: sw }); hd.root.classList.add("kl-hero"); hd.head.prepend(spr(SPR.seed(k), 36, EMOJI.seed));
+      const form = lkForm(entry.settings, () => lkSave()); form.setDisabled(!entry.enabled); detail.replaceChildren(hd.root, form.root);
+    };
+    search.oninput = paintList; paintList(); paintDetail(); return {};
+  }
+  function lkRestrict(body, win) {
+    const root = h("div", "kl-tab"); body.append(root); win.setSub("Eggs, decor, friend bonus and pet sales");
+    // friend bonus
+    const pill = h("span", "kl-pill"), fb = lkCard("Friend bonus", { subtitle: "Crops only sell with at least this bonus.", control: pill }), st = h("div", "kl-hint"); let req = LKR.minRequiredPlayers;
+    const showFb = () => {
+      const need = (req - 1) * 10, cur = lkFbNow(), pct = Number.isFinite(cur) ? cur : 0, players = clamp(Math.round(pct / 10) + 1, 1, 6);
+      if (need <= 0) { pill.textContent = "Off"; pill.dataset.t = ""; st.textContent = `Your bonus now: ${pct}% (${players} players).`; return; }
+      const ok = pct + LK_EPS >= need; pill.textContent = ok ? "Sale allowed" : "Sale locked"; pill.dataset.t = ok ? "ok" : "bad";
+      st.textContent = ok ? `Your bonus of ${pct}% (${players} players) meets the ${need}% needed.` : `Needs ${need}% (${req} players) or more.`;
+    };
+    const fbS = lkSlider("Minimum", 0, LK_FB_MAX, LK_FB_STEP, (v) => `+${v}%`, (v) => { req = Math.round(v / 10) + 1; showFb(); }, (v) => { req = Math.round(v / 10) + 1; LKR.minRequiredPlayers = req; lkrSave(); showFb(); });
+    fbS.set((req - 1) * 10); fb.body.append(fbS.line, st); showFb();
+    // decor
+    const decor = lkCard("Decor pickup", { subtitle: "Stops placed decor from being picked up.", control: lkSwitch(LKR.decorPickupLocked, (on) => { LKR.decorPickupLocked = on; lkrSave(); }, "Lock decor pickup") });
+    // eggs
+    const eggs = lkCard("Egg hatching", { subtitle: "Locked eggs can't be hatched." }), eg = h("div", "kl-eggs"); eggs.body.append(eg);
+    for (const id of Object.keys(KD.eggs)) { const row = h("div", "kl-erow"), name = h("span", "kl-en"); name.textContent = KD.eggs[id].n || id; row.append(spr(SPR.egg(id), 28, EMOJI.egg), name, lkSwitch(LKR.eggLocks[id] === true, (on) => { if (on) LKR.eggLocks[id] = true; else delete LKR.eggLocks[id]; lkrSave(); }, `Lock ${KD.eggs[id].n || id}`)); eg.append(row); }
+    // sell pets
+    const P = LKR.sellAllPets, saveP = () => { lkrSave(); showP(); };
+    const pOn = lkSwitch(P.enabled, (on) => { P.enabled = on; saveP(); }, "Pet sale protections"), pets = lkCard("Pet sale protection", { subtitle: "Blocks selling a protected pet.", control: pOn });
+    const rowOf = (title, hint, ctrl) => { const r = h("div", "kl-row"), s = h("span", "", `<b>${esc(title)}</b>${hint ? `<small>${esc(hint)}</small>` : ""}`); r.append(s, ctrl); return r; };
+    const gSw = lkSwitch(P.protectGold, (on) => { P.protectGold = on; saveP(); }, "Protect gold pets"), rSw = lkSwitch(P.protectRainbow, (on) => { P.protectRainbow = on; saveP(); }, "Protect rainbow pets"), mSw = lkSwitch(P.protectMaxStr, (on) => { P.protectMaxStr = on; saveP(); }, "Protect strong pets");
+    const mNum = h("input", "kx-search kl-num"); mNum.type = "number"; mNum.min = 0; mNum.max = 100; mNum.step = 1; mNum.value = String(P.maxStrThreshold); mNum.setAttribute("aria-label", "Max STR threshold");
+    mNum.onchange = () => { const n = Number(mNum.value); P.maxStrThreshold = Number.isFinite(n) ? clamp(Math.round(n), 0, 100) : 0; mNum.value = String(P.maxStrThreshold); saveP(); };
+    const mCtl = h("div", "kl-pair"); mCtl.append(mNum, mSw);
+    const rows = [rowOf("Gold pets", "", gSw), rowOf("Rainbow pets", "", rSw), rowOf("Strong pets", "Max STR at or above this number.", mCtl)];
+    const rar = h("div", "kl-rar"), chips = h("div", "kl-chips"); rar.append(h("div", "", "<b>Rarities</b><small>Tap a rarity to protect it.</small>"), chips);
+    const chipEls = LK_RARITIES.map((r) => { const c = h("button", "kl-chip", esc(r)); c.type = "button"; c.style.setProperty("--rc", rarityColour(r)); c.onclick = () => { const i = P.protectedRarities.indexOf(r); if (i >= 0) P.protectedRarities.splice(i, 1); else P.protectedRarities.push(r); saveP(); }; chips.append(c); return [r, c]; });
+    pets.body.append(...rows, rar);
+    function showP() { pOn.setChecked(P.enabled); gSw.setChecked(P.protectGold); rSw.setChecked(P.protectRainbow); mSw.setChecked(P.protectMaxStr); for (const r of rows) r.classList.toggle("kl-dim", !P.enabled); for (const s of [gSw, rSw, mSw]) s.setDisabled(!P.enabled); const off = !P.enabled || !P.protectMaxStr; mNum.disabled = off; mNum.classList.toggle("kl-dim", off); rar.classList.toggle("kl-dis", !P.enabled); rar.inert = !P.enabled; for (const [r, c] of chipEls) c.dataset.on = String(P.protectedRarities.includes(r)); }
+    showP(); root.append(fb.root, decor.root, eggs.root, pets.root);
+    return { update: showFb };
+  }
+  createWin({ id: "locker", title: "Locker", icon: "lock", accent: ["#f08a6a", "#ffd0bd"], w: 560, h: 600, every: 1000, tabs: [{ id: "general", label: "General", render: lkGeneral }, { id: "crop", label: "Per crop", render: lkPerCrop }, { id: "restrict", label: "Restrictions", render: lkRestrict }] });
+  const LK_CSS = `
+.kl-form,.kl-tab,.kl-detail{display:grid;gap:10px;align-content:start;min-width:0}
+.kl-card{display:grid;gap:8px;padding:10px 12px;border-radius:16px;background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.08);min-width:0}
+.kl-hero{border-color:color-mix(in srgb,var(--ac) 45%,transparent);background:linear-gradient(145deg,color-mix(in srgb,var(--ac) 14%,transparent),rgba(0,0,0,.22))}
+.kl-ch{display:flex;align-items:center;gap:10px;min-width:0}.kl-ch>div{flex:1;min-width:0}.kl-ch b{display:block;font-size:13.5px;color:#e9f2ec}.kl-ch small{display:block;margin-top:1px;color:#8db5a0;font-weight:600;line-height:1.25}
+.kl-cb{display:grid;gap:8px;min-width:0}.kl-hint{color:#8db5a0;font-size:11.5px;line-height:1.3;font-weight:600}.kl-empty{padding:14px 8px;text-align:center;color:#8db5a0;font-size:11.5px}
+.kl-warn{padding:7px 10px;border-radius:10px;background:rgba(239,106,106,.14);border:1px solid rgba(239,106,106,.4);color:#ffb4b4;font-size:11.5px;line-height:1.3}
+.kl-dis{opacity:.45;pointer-events:none}.kl-dim{opacity:.5}
+.kl-sw{position:relative;flex:none;display:inline-block;width:38px;height:22px}.kl-sw input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;z-index:1}.kl-sw input:disabled{cursor:default}
+.kl-sw i{position:absolute;inset:0;border-radius:99px;background:#33433a;transition:background .15s}.kl-sw i::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#cfe0d5;transition:transform .15s,background .15s}
+.kl-sw input:checked+i{background:var(--ac)}.kl-sw input:checked+i::after{transform:translateX(16px);background:#11200f}
+.kl-line{display:flex;align-items:center;gap:10px;min-width:0}.kl-ln{flex:none;min-width:60px;color:#a9bdb1}.kl-line .kx-range{flex:1;min-width:0}.kl-line b{flex:none;min-width:48px;text-align:right;color:var(--ac2);white-space:nowrap}
+.kl-colors{display:flex;flex-wrap:wrap;gap:6px}.kl-color{flex:1 1 84px}.kl-color[data-on="true"]{background:var(--ac);color:#10200f}
+.kl-color.gold[data-on="true"]{background:linear-gradient(90deg,#f59e0b,#fde047)}.kl-color.rainbow[data-on="true"]{background:linear-gradient(90deg,#f43f5e,#f59e0b,#84cc16,#22d3ee,#a78bfa)}
+.kl-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:7px}.kl-tiles.dense{grid-template-columns:repeat(auto-fill,minmax(78px,1fr))}
+.kl-tile{display:grid;justify-items:center;align-content:center;gap:3px;min-height:64px;padding:7px 4px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#dce9e0;font:700 10.5px "Trebuchet MS",system-ui,sans-serif;cursor:pointer;text-align:center;line-height:1.15}
+.kl-tile[data-on="true"]{background:color-mix(in srgb,var(--ac) 22%,transparent);border-color:var(--ac);color:#fff}.kl-ti{font-size:22px;line-height:1}
+.kl-rhead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}.kl-rlist{display:grid;gap:8px}
+.kl-recipe{display:grid;gap:8px;padding:9px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)}.kl-recipe.is-edit{border-color:var(--ac)}
+.kl-tags{display:flex;flex-wrap:wrap;gap:5px}.kl-tag{display:inline-flex;align-items:center;gap:4px;padding:3px 8px 3px 5px;border-radius:99px;background:rgba(0,0,0,.3);font-size:11px;color:#dce9e0}.kl-tag i{font-style:normal}
+.kl-ract{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.kl-sp{flex:1}
+.kl-split{display:grid;grid-template-columns:minmax(128px,170px) minmax(0,1fr);gap:10px;align-items:start}.kl-lw{display:grid;gap:6px;min-width:0}
+.kl-crops{display:flex;flex-direction:column;gap:3px;max-height:min(440px,62vh);overflow:auto;scrollbar-width:thin;scrollbar-color:#2f6a49 transparent}
+.kl-crop{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:10px;border:1px solid transparent;background:none;color:#cfe0d5;font:700 11.5px "Trebuchet MS",system-ui,sans-serif;cursor:pointer;text-align:left}
+.kl-crop:hover{background:rgba(255,255,255,.05)}.kl-crop[data-on="true"]{background:color-mix(in srgb,var(--ac) 20%,transparent);border-color:var(--ac);color:#fff}.kl-cn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kl-on{font-style:normal;padding:1px 6px;border-radius:99px;background:var(--ac);color:#10200f;font-size:9.5px}
+.kl-pill{flex:none;padding:3px 10px;border-radius:99px;background:rgba(255,255,255,.08);color:#cfe0d5;font-size:11px;font-weight:700;white-space:nowrap}.kl-pill[data-t="ok"]{background:rgba(74,222,128,.2);color:#86efac}.kl-pill[data-t="bad"]{background:rgba(239,106,106,.2);color:#fca5a5}
+.kl-eggs{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,200px),1fr));gap:6px}.kl-erow{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:10px;background:rgba(255,255,255,.04);min-width:0}.kl-en{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kl-row{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:34px}.kl-row>span{display:grid;min-width:0}.kl-row small,.kl-rar small{display:block;color:#8db5a0;font-weight:600}.kl-pair{display:flex;align-items:center;gap:8px;flex:none}.kl-num{width:64px;padding:5px 8px}
+.kl-rar{display:grid;gap:6px}.kl-chips{display:flex;flex-wrap:wrap;gap:5px}.kl-chip{padding:4px 10px;border-radius:99px;border:1px solid color-mix(in srgb,var(--rc) 55%,transparent);background:none;color:var(--rc);font:700 11px "Trebuchet MS",system-ui,sans-serif;cursor:pointer}.kl-chip[data-on="true"]{background:var(--rc);color:#10200f}
+@container (max-width:470px){.kl-split{grid-template-columns:minmax(0,1fr)}.kl-crops{flex-direction:row;max-height:none;overflow-x:auto;overflow-y:hidden;padding-bottom:4px}.kl-crop{flex:none;max-width:150px}}
+@container (max-width:380px){.kl-tiles{grid-template-columns:repeat(auto-fill,minmax(74px,1fr))}.kl-tiles.dense{grid-template-columns:repeat(auto-fill,minmax(66px,1fr))}.kl-line{flex-wrap:wrap}.kl-ln{min-width:0;flex:1 0 100%}.kl-line .kx-range{flex:1 1 0}.kl-card{padding:9px 10px}.kl-row{flex-wrap:wrap}}
+#kx-locker-chip{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:2147483000;padding:5px 14px;border-radius:99px;background:rgba(122,26,26,.92);border:1px solid rgba(255,140,140,.6);color:#ffe0e0;font:700 12px "Trebuchet MS",system-ui,sans-serif;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.4);white-space:nowrap}
+`;
+  (() => { const s = document.createElement("style"); s.id = "kx-locker-style"; s.textContent = LK_CSS; (document.head || document.documentElement).append(s); })();
+
   const CSS2 = `
 .kx-win{--ac:#f0c35a;--ac2:#f6e3a1;position:fixed;z-index:2147483630;display:none;flex-direction:column;min-width:300px;min-height:220px;overflow:hidden;border-radius:20px 20px 16px 16px;color:#e9f2ec;font:600 12.5px "Trebuchet MS",system-ui,sans-serif;background:radial-gradient(130% 40% at 15% 0%,color-mix(in srgb,var(--ac) 16%,transparent),transparent 70%),linear-gradient(170deg,#112619,#08140d);border:1px solid color-mix(in srgb,var(--ac) 38%,transparent);box-shadow:0 20px 56px rgba(0,0,0,.65)}
 .kx-win *{box-sizing:border-box}
@@ -1621,8 +1947,8 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
     if (!hookRoom()) { const t = setInterval(() => { if (hookRoom()) clearInterval(t); }, 1000); }
     document.addEventListener("keydown", (event) => {
       const target = event.target; if (target?.isContentEditable || /^(input|textarea|select)$/i.test(target?.tagName || "")) return;
-      if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || !/^Key[OCDRN]$/.test(event.code)) return;
-      event.preventDefault(); event.stopPropagation(); if (event.code === "KeyO") toggleAlmanac(); else WINS[{ KeyC: "calc", KeyD: "pets", KeyR: "room", KeyN: "alerts" }[event.code]]?.toggle();
+      if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || !/^Key[OCDRNL]$/.test(event.code)) return;
+      event.preventDefault(); event.stopPropagation(); if (event.code === "KeyO") toggleAlmanac(); else WINS[{ KeyC: "calc", KeyD: "pets", KeyR: "room", KeyN: "alerts", KeyL: "locker" }[event.code]]?.toggle();
     }, true);
     document.addEventListener("keydown", (event) => { if (event.key === "Escape") { const open = Object.values(WINS).filter((w) => w.isOpen()).sort((a, b) => Number(b.root.style.zIndex) - Number(a.root.style.zIndex))[0]; if (open) open.closeWin(); else if (almanac?.style.display === "block") closeAlmanac(); } }, true);
   }
