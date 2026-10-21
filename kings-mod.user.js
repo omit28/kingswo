@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.4.5
+// @version      3.5.0
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -21,7 +21,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.4.5", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.5.0", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const ALERT_KEY = "mg-king-alerts-v1";
