@@ -2,7 +2,7 @@
 // @name         King's Mod
 // @namespace    Quinoa
 // @author       King
-// @version      3.5.0
+// @version      3.5.1
 // @description  Compact mod dock with live on/off lights, customize panel, a movable + resizable Garden Almanac, weather timer, and new Crop Calculator (Alt+C), Pet Deck (Alt+D), Room (Alt+R) and Alerts (Alt+N) windows with real seed and pet images.
 // @match        https://1227719606223765687.discordsays.com/*
 // @match        https://magiccircle.gg/r/*
@@ -21,7 +21,7 @@
 (() => {
   "use strict";
   // Title is stored encoded (two copies + checksum) and re-checked while running, so a quick text edit does not change it.
-  const VERSION_NUM = "3.5.0", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
+  const VERSION_NUM = "3.5.1", VERSION = "v" + VERSION_NUM, UPDATE_URL = "https://raw.githubusercontent.com/omit28/kingswo/main/kings-mod.user.js";   // keep VERSION_NUM equal to @version
   const _fnv = (str) => { let h = 2166136261; for (const c of str) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; } return h; };
   const TITLE = (() => { const a = String.fromCharCode(...[100,111,77,32,115,39,103,110,105,75].reverse()); return _fnv(a) === 1311861492 ? a : atob("S2luZydzIE1vZA=="); })();
   const ALERT_KEY = "mg-king-alerts-v1";
@@ -2679,6 +2679,271 @@ ${rangeRow("opacity", "Opacity", 40, 100)}${switchRow("labels", "Show names unde
       } catch (error) { console.warn("[King's Mod] sell all pets failed", error); } finally { selling = false; }
     }
   })();
+
+  // =====================================================================================================
+  //  Lighting, ported from Garden Companion: keep a weather or time of day on your screen, and set how dark,
+  //  tinted, glowing and bright the game looks. Only on your screen: nothing is sent to the game, and alerts,
+  //  timers and mutations keep following the real weather and time. Self-contained block: it adds a Lighting
+  //  window and dock button and does not change how any other feature works.
+  // =====================================================================================================
+  Object.assign(ICONS, { sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/>' });
+  ITEMS.push({ id: "lighting", win: "lighting", icon: "sun", label: "Lighting", title: "Lighting — Alt + I" });
+  const LG_KEY = "mg-king-lighting-v1";
+  const LG_WEATHERS = [["live", "Live"], ["clear", "Clear"], ["Rain", "Rain"], ["Frost", "Snow"], ["Thunderstorm", "Storm"], ["Dawn", "Dawn"], ["AmberMoon", "Amber"]];
+  const LG_TIMES = [["live", "Live"], ["day", "Day"], ["sunset", "Sunset"], ["midnight", "Night"], ["sunrise", "Sunrise"]];
+  const LG_DEFAULT = { weather: "live", time: "live", night: 100, nightColour: 100, glow: 100, nightTint: "", sunsetTint: "", sunriseTint: "", brightness: 100, contrast: 100, saturation: 100, warmth: 0, hue: 0 };
+  const LG_KEYS = ["night", "nightColour", "glow", "nightTint", "sunsetTint", "sunriseTint", "brightness", "contrast", "saturation", "warmth", "hue"];
+  const LG_NUMERIC = ["night", "nightColour", "glow", "brightness", "contrast", "saturation", "warmth", "hue"];
+  const LG_UNITS = { night: "%", nightColour: "%", glow: "%", brightness: "%", contrast: "%", saturation: "%", warmth: "%", hue: "°" };
+  let lgCache = null; const lgListeners = new Set();
+  function lgSky() {
+    if (lgCache) return lgCache; const saved = readJson(LG_KEY), next = { ...LG_DEFAULT };
+    if (saved && typeof saved === "object") for (const k of Object.keys(LG_DEFAULT)) if (k in saved && typeof saved[k] === typeof LG_DEFAULT[k] && (typeof saved[k] !== "number" || Number.isFinite(saved[k]))) next[k] = saved[k];
+    return lgCache = next;
+  }
+  function lgSave(patch, persist = true) {
+    lgCache = { ...lgSky(), ...patch }; if (persist) writeJson(LG_KEY, lgCache);
+    lgApplyFilter(); lgApplyNight(); for (const fn of lgListeners) { try { fn(); } catch {} }
+  }
+  const lgNeedsFrameHook = () => { const s = lgSky(); return s.weather !== "live" || s.time !== "live" || s.glow !== 100; };
+  const lgGlowScale = () => Math.max(0, lgSky().glow) / 100;
+  const lgChanged = (s) => LG_KEYS.some((k) => s[k] !== LG_DEFAULT[k]);
+  const lgNightChanged = (s) => s.night !== 100 || s.nightColour !== 100 || s.nightTint || s.sunsetTint || s.sunriseTint;
+  function lgWeather(real) { const { weather } = lgSky(); if (weather === "live") return real; return weather === "clear" ? null : weather; }
+  const LG_CYCLE = [["sunrise", 10], ["day", 570], ["sunset", 10], ["midnight", 10]], LG_TOTAL = LG_CYCLE.reduce((a, [, m]) => a + m, 0);
+  const lgStageEnd = (stage) => { let end = 0; for (const [name, minutes] of LG_CYCLE) { end += minutes; if (name === stage) break; } return end / LG_TOTAL; };
+  const LG_SUNRISE_END = lgStageEnd("sunrise"), LG_SUNSET_START = lgStageEnd("day"), LG_SUNSET_END = lgStageEnd("sunset");
+  const LG_MIDDLE = (() => { const m = {}; let start = 0; for (const [stage, minutes] of LG_CYCLE) { m[stage] = (start + minutes / 2) / LG_TOTAL; start += minutes; } return m; })();
+  function lgStageAt(phase) { const p = (phase % 1 + 1) % 1; return p < LG_SUNRISE_END ? "sunrise" : p < LG_SUNSET_START ? "day" : p < LG_SUNSET_END ? "sunset" : "midnight"; }
+  function lgPhase(real) { const { time } = lgSky(); return time !== "live" && LG_MIDDLE[time] != null ? LG_MIDDLE[time] : real; }
+
+  // ---- small helpers (a repeating job, a retry loop, and a guard that switches a hook off if it keeps failing) ----
+  function lgTicker(job, ms) { let timer = 0; const run = () => { try { job(); } catch (error) { console.warn("[King's Mod] lighting job failed", error); } }; const t = { start() { if (timer) return; timer = setInterval(run, ms); run(); }, stop() { if (!timer) return; clearInterval(timer); timer = 0; }, sync(on) { if (on) t.start(); else t.stop(); } }; return t; }
+  function lgRetry(attempt, label) { const started = Date.now(); const run = () => { let done = false; try { done = attempt(); } catch (error) { console.warn(`[King's Mod] ${label} failed while hooking into the game`, error); } if (!done) setTimeout(run, Date.now() - started < 120000 ? 500 : 5000); }; run(); }
+  const lgFailures = new Map();
+  const lgDisabled = (name) => (lgFailures.get(name) ?? 0) >= 3;
+  function lgGuard(name, work, fallback) { if (lgDisabled(name)) return fallback; try { return work(); } catch (error) { const n = (lgFailures.get(name) ?? 0) + 1; lgFailures.set(name, n); console.warn(`[King's Mod] ${name} failed${n >= 3 ? " and was switched off until the page is reloaded" : ""}`, error); return fallback; } }
+
+  // ---- the game's store (for the night grade) ----
+  let lgStore = null; (async () => { for (let i = 0; i < 150 && !lgStore; i++) { try { const s = await getStore(); if (s && typeof s.get === "function" && typeof s.set === "function") { lgStore = s; if (lgNightChanged(lgSky())) lgRetry(() => { lgApplyNight(); return lgTouched; }, "the night lighting"); break; } } catch {} await sleep(2000); } })();
+  const lgGameStore = () => lgStore;
+
+  // ---- Night: the game's own night grade, scaled and tinted ----
+  let lgGradeAtom = null, lgBase = null, lgTouched = false, lgWritten = null;
+  function lgGradeReady() {
+    if (lgBase && lgGradeAtom) return true; const store = lgGameStore(); lgGradeAtom ??= findAtom("nightGradeSettingsAtom"); if (!store || !lgGradeAtom) return false;
+    const value = store.get(lgGradeAtom); if (!value || typeof value.brightness !== "number" || typeof value.colorOpacity !== "number") return false; lgBase = { ...value }; return true;
+  }
+  const LG_NIGHT = "Night lighting";
+  const lgGradeAvailable = () => !lgDisabled(LG_NIGHT) && lgGuard(LG_NIGHT, lgGradeReady, false);
+  const lgHexToNumber = (hex, fb) => (/^#[0-9a-f]{6}$/i.test(hex) ? parseInt(hex.slice(1), 16) : fb);
+  const lgNumberToHex = (v) => `#${(v >>> 0).toString(16).padStart(6, "0").slice(-6)}`;
+  const lgApplyNight = () => { lgGuard(LG_NIGHT, lgWriteNight, undefined); };
+  function lgWriteNight() {
+    if (!lgGradeReady()) return; const sky = lgSky(), store = lgGameStore(), base = lgBase;
+    if (!lgNightChanged(sky)) { if (lgTouched) { store.set(lgGradeAtom, { ...base }); lgTouched = false; lgWritten = null; } lgWatch.stop(); return; }
+    const darkness = Math.max(0, sky.night) / 100;
+    if (!["brightness", "contrast", "colorOpacity", "color", "sunsetColor", "sunriseColor"].every((k) => Number.isFinite(base[k]))) return;
+    store.set(lgGradeAtom, lgWritten = { ...base, brightness: base.brightness * darkness, contrast: base.contrast * darkness, colorOpacity: Math.min(1, base.colorOpacity * Math.max(0, sky.nightColour) / 100), color: lgHexToNumber(sky.nightTint, base.color), sunsetColor: lgHexToNumber(sky.sunsetTint, base.sunsetColor), sunriseColor: lgHexToNumber(sky.sunriseTint, base.sunriseColor) });
+    lgTouched = true; lgWatch.start();
+  }
+  const lgWatch = lgTicker(() => lgGuard(LG_NIGHT, () => { const store = lgGameStore(); if (lgTouched && store && lgGradeAtom && store.get(lgGradeAtom) !== lgWritten) lgWriteNight(); }, undefined), 5000);
+
+  // ---- Display: brightness, contrast, saturation, warmth and hue on the game canvas ----
+  let lgFilterStyle = null;
+  function lgApplyFilter() {
+    const { brightness, contrast, saturation, warmth, hue } = lgSky();
+    const parts = [brightness !== 100 ? `brightness(${brightness / 100})` : "", contrast !== 100 ? `contrast(${contrast / 100})` : "", saturation !== 100 ? `saturate(${saturation / 100})` : "", warmth ? `sepia(${warmth / 100})` : "", hue ? `hue-rotate(${hue}deg)` : ""].filter(Boolean);
+    if (!parts.length) { lgFilterStyle?.remove(); lgFilterStyle = null; return; }
+    if (!lgFilterStyle) { lgFilterStyle = document.createElement("style"); lgFilterStyle.id = "kx-lighting-filter"; (document.head || document.documentElement).appendChild(lgFilterStyle); }
+    lgFilterStyle.textContent = `.QuinoaCanvas canvas { filter: ${parts.join(" ")}; }`;
+  }
+
+  // ---- Scene: finding the game's scene systems (they are only reachable while the farm is being built) ----
+  const LG_TILE_NAMES = new Set(["tileObject", "gardenObject"]), LG_WRAP = "__kxLightingMapSet";
+  const LG_ALL = new Map(); let lgMapSetOriginal = null, lgReleaseTimer = 0;
+  const LG_NEEDED = ["lighting", "dayNight", "rightSideRail", "sunsetPrompt"];
+  const lgHaveAll = () => LG_NEEDED.every((n) => LG_ALL.has(n)) && [...LG_TILE_NAMES].some((n) => LG_ALL.has(n));
+  function lgRelease() { const proto = PW.Map?.prototype; if (proto && proto.set?.[LG_WRAP] && typeof lgMapSetOriginal === "function") proto.set = lgMapSetOriginal; lgMapSetOriginal = null; }
+  function lgWatchTile(system) {
+    const destroy = system?.destroy; if (typeof destroy !== "function" || destroy.__kxLgWrapped) return;
+    const wrapped = function (...args) { if (LG_ALL.get(system.name) === system) { LG_ALL.clear(); lgCtx = null; lgInstallCapture(); } return destroy.apply(this, args); };
+    wrapped.__kxLgWrapped = true; system.destroy = wrapped;
+  }
+  function lgNoteSystem(system) {
+    try {
+      if (typeof system?.name !== "string") return; LG_ALL.set(system.name, system); if (LG_TILE_NAMES.has(system.name)) lgWatchTile(system);
+      if (lgHaveAll()) { clearTimeout(lgReleaseTimer); lgReleaseTimer = setTimeout(lgRelease, 20000); }   // the last few systems register a moment after these
+    } catch {}
+  }
+  function lgInstallCapture() {
+    const proto = PW.Map?.prototype, original = proto?.set; if (typeof original !== "function" || original[LG_WRAP]) return; lgMapSetOriginal = original;
+    function watched(key, value) { const result = original.call(this, key, value); try { const system = value?.system; if (system && typeof system === "object" && system.name === key) lgNoteSystem(system); } catch {} return result; }
+    watched[LG_WRAP] = true; proto.set = watched;
+  }
+  lgInstallCapture();
+  const lgSys = (name) => LG_ALL.get(name) ?? null;
+  function lgTileSystem() { for (const name of LG_TILE_NAMES) { const s = LG_ALL.get(name); if (s?.map && typeof s.updateTileData === "function") return s; } return null; }
+
+  // ---- Scene: patching the scene so it draws with the weather, time and glow you picked ----
+  const LG_GLOW_PATCHED = "__kxGlowPatched", LG_REAL_VIEW = [["rightSideRail", "draw"], ["sunsetPrompt", "update"]];
+  let lgRealDepth = 0, lgSceneDepth = 0, lgRealPhaseNow = null, lgCtx = null;
+  function lgScaleAlpha(target) { if (!target?.visible || typeof target.alpha !== "number" || !Number.isFinite(target.alpha)) return; target.alpha = Math.max(0, Math.min(1, target.alpha * lgGlowScale())); }
+  function lgPatchGlows() {
+    const lighting = lgSys("lighting"); if (!(lighting?.lights instanceof Set)) return;
+    const light = lighting.lights.values().next().value, proto = light && Object.getPrototypeOf(light);
+    if (!proto || proto === Object.prototype || proto[LG_GLOW_PATCHED] || typeof proto.draw !== "function") return;
+    const original = proto.draw;
+    proto.draw = function (...args) {
+      const result = original.apply(this, args);
+      if (lgGlowScale() !== 1) lgGuard("Glow", () => {
+        for (const glow of Array.isArray(this.glows) ? this.glows : []) if (!glow?.drawnByDay) lgScaleAlpha(glow?.sprite);
+        for (const halo of Array.isArray(this.halos) ? this.halos : []) lgScaleAlpha(halo);
+        for (const pool of Array.isArray(this.coloredPools) ? this.coloredPools : []) lgScaleAlpha(pool?.sprite);
+        lgScaleAlpha(this.groundPool ?? this.illumination); lgScaleAlpha(this.faceGlow);
+      }, undefined);
+      return result;
+    };
+    proto[LG_GLOW_PATCHED] = true;
+  }
+  function lgPatchRealViewSystems() {
+    if (lgGlowScale() !== 1) lgGuard("Glow (finding lights)", lgPatchGlows, undefined);
+    const dayNight = lgSys("dayNight");
+    if (dayNight && typeof dayNight.publishStage === "function" && !dayNight.__kxRealStagePatched) {
+      const original = dayNight.publishStage; dayNight.__kxRealStagePatched = true;
+      dayNight.publishStage = function (stage, ...rest) {
+        const published = lgGuard("Real day stage", () => (lgSky().time !== "live" && typeof lgRealPhaseNow === "number" && Number.isFinite(lgRealPhaseNow) ? lgStageAt(lgRealPhaseNow) : stage), stage);
+        return original.call(this, published, ...rest);
+      };
+    }
+    for (const [name, system] of LG_ALL) {
+      if (!system || LG_REAL_VIEW.some(([real]) => real === name) || system.__kxSceneDrawPatched) continue; system.__kxSceneDrawPatched = true;
+      for (const method of name === "lighting" ? ["draw", "update", "lateDraw"] : ["draw", "update"]) {
+        const original = system[method]; if (typeof original !== "function") continue;
+        system[method] = function (...args) { lgSceneDepth++; try { return original.apply(this, args); } finally { lgSceneDepth--; } };
+      }
+    }
+    for (const [name, method] of LG_REAL_VIEW) {
+      const system = lgSys(name); if (!system || typeof system[method] !== "function" || system.__kxRealViewPatched) continue;
+      const original = system[method]; system.__kxRealViewPatched = true;
+      system[method] = function (...args) { lgRealDepth++; try { return original.apply(this, args); } finally { lgRealDepth--; } };
+    }
+  }
+  function lgOverrideContext(context) {
+    lgCtx = context; let real = context.weatherId;
+    Object.defineProperty(context, "weatherId", {
+      configurable: true, enumerable: true,
+      // Read by the whole scene every frame, so whatever goes wrong here hands back the real weather.
+      get: () => { if (lgRealDepth || lgSky().weather === "live") return real; return lgGuard("Weather lock", () => lgWeather(real), real); },
+      set: (value) => { real = value; }
+    });
+    if (!("dayNightPhase01" in context)) return;
+    let realPhase = context.dayNightPhase01; lgRealPhaseNow = typeof realPhase === "number" ? realPhase : null;
+    Object.defineProperty(context, "dayNightPhase01", {
+      configurable: true, enumerable: true,
+      get: () => {
+        if (lgRealDepth || !lgSceneDepth || lgSky().time === "live") return realPhase;
+        return lgGuard("Time lock", () => { const phase = lgPhase(Number(realPhase)); return typeof phase === "number" && Number.isFinite(phase) && phase >= 0 && phase <= 1 ? phase : realPhase; }, realPhase);
+      },
+      set: (value) => { realPhase = value; lgRealPhaseNow = typeof value === "number" ? value : null; }
+    });
+  }
+  function lgPatchWeatherDraw() {
+    lgPatchRealViewSystems(); const system = lgTileSystem(); if (!system || typeof system.draw !== "function" || system.__kxWeatherPatched) return;
+    const original = system.draw; system.__kxWeatherPatched = true;
+    system.draw = function (context, ...rest) {
+      if (context && typeof context === "object" && context !== lgCtx) { try { lgOverrideContext(context); } catch {} }
+      lgSceneDepth++; try { return original.call(this, context, ...rest); } finally { lgSceneDepth--; }
+    };
+  }
+  const lgHook = lgTicker(() => lgPatchWeatherDraw(), 2000);
+  lgListeners.add(() => lgHook.sync(lgNeedsFrameHook()));
+  lgHook.sync(lgNeedsFrameHook());
+  function lgBoot() { lgApplyFilter(); if (lgNightChanged(lgSky())) lgRetry(() => { lgApplyNight(); return lgTouched; }, "the night lighting"); }
+  if (document.body) lgBoot(); else document.addEventListener("DOMContentLoaded", lgBoot, { once: true });
+
+  // ---- the Lighting window ----
+  const LG_CHOICE_ICONS = { Rain: "Wet", Frost: "Frozen", Thunderstorm: "Thunderstruck", Dawn: "Dawnlit", AmberMoon: "Amberlit" };
+  const LG_CHOICE_EMOJI = { clear: "🌤️", Rain: "🌧️", Frost: "❄️", Thunderstorm: "⛈️", Dawn: "🌅", AmberMoon: "🌙", day: "☀️", sunset: "🌇", midnight: "🌃", sunrise: "🌄" };
+  const lgLabelOf = (choices, id) => choices.find(([c]) => c === id)?.[1] ?? id;
+  function lgChoiceButton(key, id, text, current, onPick) {
+    const b = h("button", "kg-choice"); b.type = "button"; b.dataset.on = String(id === current);
+    if (id !== "live") b.append(LG_CHOICE_ICONS[id] ? spr(SPR.mut(LG_CHOICE_ICONS[id]), 24, LG_CHOICE_EMOJI[id]) : h("span", "kg-ce", LG_CHOICE_EMOJI[id] || ""));
+    b.append(h("span", "", esc(text))); b.onclick = () => onPick(id); return b;
+  }
+  function lgSlider(key, label, min, max, value, note, disabled, repaint) {
+    const wrap = h("label", "kg-slider"), head = h("span", "kg-slider-head", `<b>${esc(label)}</b>`), val = h("em", "", `${value}${LG_UNITS[key]}`), input = h("input", "kx-range"); wrap.dataset.disabled = String(!!disabled); if (note) wrap.title = note;
+    input.type = "range"; input.min = min; input.max = max; input.step = 5; input.value = value; input.disabled = !!disabled; input.setAttribute("aria-label", label); head.append(val); wrap.append(head, input);
+    input.oninput = () => { const v = Number(input.value); lgSave({ [key]: v }, false); val.textContent = `${v}${LG_UNITS[key]}`; };
+    input.addEventListener("change", () => { lgSave({ [key]: Number(input.value) }); input.blur(); repaint(); });
+    input.addEventListener("pointerup", () => input.blur()); return wrap;
+  }
+  function lgColour(key, label, value, fallback, disabled, repaint) {
+    const wrap = h("label", "kg-colour"), input = h("input"); input.type = "color"; input.value = value || (fallback != null ? lgNumberToHex(fallback) : "#000000"); input.disabled = !!disabled; input.setAttribute("aria-label", label);
+    wrap.append(input, h("span", "", `${esc(label)}${value ? "" : "<small>game default</small>"}`));
+    input.oninput = () => lgSave({ [key]: input.value }, false); input.addEventListener("change", () => { lgSave({ [key]: input.value }); repaint(); }); return wrap;
+  }
+  function lgRender(body, win) {
+    const root = h("div", "kg"); body.append(root); let shownGrade = null;
+    function paint() {
+      const keep = body.scrollTop, sky = lgSky(), grade = lgGradeAvailable(); shownGrade = grade; root.replaceChildren();
+      const locks = [sky.weather !== "live" ? lgLabelOf(LG_WEATHERS, sky.weather) : "", sky.time !== "live" ? lgLabelOf(LG_TIMES, sky.time) : ""].filter(Boolean), tuned = lgChanged(sky);
+      win.setSub(!locks.length && !tuned ? "Live weather and time" : `${locks.length ? locks.join(" · ") : "Live"}${tuned ? " · lighting adjusted" : ""}`);
+      // status strip
+      const status = h("section", "kg-card kg-status"); status.dataset.locked = String(lgNeedsFrameHook() || tuned);
+      if (!locks.length && !tuned) status.append(h("b", "", "Live"), h("span", "", "Showing the real weather and time."));
+      else { const live = h("button", "kx-btn", "Back to live"); live.type = "button"; live.onclick = () => { lgSave({ ...LG_DEFAULT }); paint(); }; status.append(h("b", "", esc(locks.length ? locks.join(" · ") : "Live")), h("span", "", tuned ? "Lighting adjusted." : "Only on your screen."), live); }
+      // scene
+      const scene = h("section", "kg-card"); scene.append(h("h3", "", "Scene"));
+      for (const [key, label, choices] of [["weather", "Weather", LG_WEATHERS], ["time", "Time", LG_TIMES]]) {
+        const row = h("div", "kg-row"), box = h("div", "kg-choices"); row.append(h("span", "", label), box);
+        for (const [id, text] of choices) box.append(lgChoiceButton(key, id, text, sky[key], (v) => { lgSave({ [key]: v }); paint(); })); scene.append(row);
+      }
+      scene.append(h("p", "kg-note", "Only on your screen: alarms, timers and mutations follow the real weather and time. Time of day needs the game's day/night cycle."));
+      // night
+      const night = h("section", "kg-card"), nSl = h("div", "kg-sliders"), nCol = h("div", "kg-colours"); night.append(h("div", "kg-head", "<h3>Night</h3>"));
+      nSl.append(lgSlider("night", "Darkness", 0, 150, sky.night, "How far night darkens. Glows stay full.", !grade, paint), lgSlider("nightColour", "Tint strength", 0, 150, sky.nightColour, "How strongly night is tinted.", !grade, paint), lgSlider("glow", "Glow", 0, 300, sky.glow, "How brightly lamps, lanterns and glowing crops shine at night, up to full strength.", false, paint));
+      nCol.dataset.disabled = String(!grade);
+      nCol.append(lgColour("nightTint", "Night tint", sky.nightTint, lgBase?.color, !grade, paint), lgColour("sunsetTint", "Sunset tint", sky.sunsetTint, lgBase?.sunsetColor, !grade, paint), lgColour("sunriseTint", "Sunrise tint", sky.sunriseTint, lgBase?.sunriseColor, !grade, paint));
+      night.append(nSl, nCol); if (!grade) night.append(h("p", "kg-note", "The night settings need a game build with its night grade and store (1604 or later)."));
+      // display
+      const display = h("section", "kg-card"), head = h("div", "kg-head", "<h3>Display</h3>"), reset = h("button", "kx-btn", "Reset lighting"), dSl = h("div", "kg-sliders"); reset.type = "button";
+      reset.onclick = () => { lgSave(Object.fromEntries(LG_KEYS.map((k) => [k, LG_DEFAULT[k]]))); paint(); }; head.append(reset);
+      dSl.append(lgSlider("brightness", "Brightness", 50, 150, sky.brightness, "", false, paint), lgSlider("contrast", "Contrast", 50, 150, sky.contrast, "", false, paint), lgSlider("saturation", "Saturation", 0, 200, sky.saturation, "", false, paint), lgSlider("warmth", "Warmth", 0, 100, sky.warmth, "", false, paint), lgSlider("hue", "Hue", -180, 180, sky.hue, "", false, paint));
+      display.append(head, dSl);
+      root.append(status, scene, night, display); body.scrollTop = keep;
+    }
+    paint(); return { update() { if (lgGradeAvailable() !== shownGrade) paint(); } };
+  }
+  createWin({ id: "lighting", title: "Lighting", icon: "sun", accent: ["#f6c453", "#ffe6a3"], w: 560, h: 620, every: 2000, tabs: [{ id: "lighting", label: "Lighting", render: lgRender }] });
+  const LG_CSS = `
+.kg{display:grid;gap:10px;align-content:start;min-width:0}
+.kg-card{display:grid;gap:8px;padding:10px 12px;border-radius:16px;background:rgba(0,0,0,.24);border:1px solid rgba(255,255,255,.08);min-width:0}
+.kg-card h3{margin:0;font:700 14px Georgia,"Palatino Linotype",serif;color:var(--ac2)}
+.kg-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.kg-status{display:flex;align-items:center;gap:10px;padding:6px 8px 6px 12px}.kg-status b{color:#e9f2ec;font-size:13px}.kg-status span{flex:1;min-width:0;color:#8db5a0;font-size:12px}
+.kg-status[data-locked="true"]{border-color:color-mix(in srgb,var(--ac) 55%,transparent);background:color-mix(in srgb,var(--ac) 14%,transparent)}
+.kg-status .kx-btn,.kg-head .kx-btn{padding:4px 11px;font-size:11.5px}
+.kg-row{display:grid;grid-template-columns:56px minmax(0,1fr);align-items:center;gap:10px}.kg-row>span{color:#8db5a0;font-size:12px;font-weight:700}
+.kg-choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(58px,1fr));gap:4px}
+.kg-choice{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:50px;padding:5px 4px;border-radius:11px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#a9bdb1;font:700 11px "Trebuchet MS",system-ui,sans-serif;cursor:pointer}
+.kg-choice:hover{color:#fff}.kg-choice[data-on="true"]{color:#fff;border-color:var(--ac);background:color-mix(in srgb,var(--ac) 20%,transparent);box-shadow:inset 0 0 0 1px var(--ac)}.kg-ce{font-size:20px;line-height:24px;height:24px}
+.kg-sliders{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 18px}
+.kg-slider{display:flex;flex-direction:column;gap:6px;min-width:0}.kg-slider-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}.kg-slider-head b{color:#dce9e0;font-size:12px}.kg-slider-head em{color:var(--ac2);font-size:12px;font-style:normal;font-variant-numeric:tabular-nums}
+.kg-slider input{width:100%;accent-color:var(--ac)}.kg-slider[data-disabled="true"],.kg-colours[data-disabled="true"]{opacity:.45}
+.kg-colours{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:4px}
+.kg-colour{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer}.kg-colour input{flex:none;width:30px;height:24px;padding:0;border:1px solid rgba(255,255,255,.2);border-radius:6px;background:none;cursor:pointer}
+.kg-colour span{display:flex;flex-direction:column;min-width:0;color:#dce9e0;font-size:12px;font-weight:700}.kg-colour small{color:#8db5a0;font-size:10px;font-weight:600}
+.kg-note{margin:2px 0 0;color:#8db5a0;font-size:11.5px;line-height:1.4;font-weight:600}
+@container (max-width:520px){.kg-sliders,.kg-colours{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container (max-width:380px){.kg-sliders,.kg-colours{grid-template-columns:1fr}.kg-row{grid-template-columns:1fr;gap:5px}.kg-status{flex-wrap:wrap}}
+`;
+  (() => { const s = document.createElement("style"); s.id = "kx-lighting-style"; s.textContent = LG_CSS; (document.head || document.documentElement).append(s); })();
+  document.addEventListener("keydown", (event) => {   // Alt + I, like the other windows
+    const target = event.target; if (target?.isContentEditable || /^(input|textarea|select)$/i.test(target?.tagName || "")) return;
+    if (event.repeat || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey || event.code !== "KeyI") return;
+    event.preventDefault(); event.stopPropagation(); WINS.lighting?.toggle();
+  }, true);
 
   if (document.body) install(); else document.addEventListener("DOMContentLoaded", install, { once: true });
 })();
